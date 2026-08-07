@@ -1,0 +1,25 @@
+[project]
+name = "agy-bridge"
+version = "0.0.1"
+description = "Claude ↔ Antigravity(agy) 과학 검증 MCP 브리지 — 브리지에는 LLM이 없다"
+readme = "docs/plan.md"
+requires-python = ">=3.14"
+license = "MIT"
+# 외부 의존성은 mcp 하나로 제한한다 (§7.1). 나머지는 표준 라이브러리로 해결.
+dependencies = [
+    "mcp",
+]
+
+[project.scripts]
+agy-bridge = "agy_bridge.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.13"]
+build-backend = "uv_build"

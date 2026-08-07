@@ -3,7 +3,7 @@
 # (3.13.14 / 3.12.13도 동일하게 전부 통과했으나 상위 버전 우선 원칙에 따라 3.14 고정)
 python = "3.14"
 uv = "latest"
-node = "latest"
+# node는 사용하지 않는다 (§7.1) — MCP stdio 서버에 불필요, 이식 시 런타임 표면 축소.
 
 [env]
 # 사내 프록시(<제품명>)가 github.com을 MITM한다. uv의 번들 webpki 루트에는
