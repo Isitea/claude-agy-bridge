@@ -48,6 +48,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.command == "serve":
+        from agy_bridge.server import serve
+
+        return serve()
     print(f"agy-bridge {args.command}: {_PHASE_HINT}", file=sys.stderr)
     return 2
 
