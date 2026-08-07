@@ -77,9 +77,6 @@ CLAUDE_MD_SNIPPET = """\
   `agy_result`로 회수하라.
 """
 
-_PHASE_HINT = "아직 구현되지 않았습니다. 로드맵은 docs/plan.md §11 참조."
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agy-bridge",
@@ -129,8 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         return _init(args)
     if args.command == "doctor":
         return _doctor(args)
-    print(f"agy-bridge {args.command}: {_PHASE_HINT}", file=sys.stderr)
-    return 2
+    raise AssertionError(f"등록되지 않은 서브커맨드: {args.command}")
 
 
 # ── budget ──────────────────────────────────────────────

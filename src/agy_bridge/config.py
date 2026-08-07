@@ -21,10 +21,10 @@ CONFIG_FILENAME = ".agy-bridge.toml"
 DEFAULT_MODEL = "gemini-3.1-pro-high"
 DEFAULT_EFFORT = "high"
 DEFAULT_MAX_INLINE_CHARS = 100_000  # argv 단일 인자 131,072 B 한계 대비 마진 (§2.3-D)
-DEFAULT_WAIT_SECONDS = 45           # 동기 대기 창 — Phase 2 비동기에서 사용 (§5)
+DEFAULT_WAIT_SECONDS = 45           # 동기 대기 창 — 넘으면 job 핸들 반환 (§5)
 DEFAULT_PRINT_TIMEOUT = 600         # agy --print-timeout, 초 (§5)
 DEFAULT_HARD_KILL_SECONDS = 900     # 브리지의 최종 안전망 (§5)
-DEFAULT_DAILY_CALL_BUDGET = 60      # Phase 5에서 강제 (§13)
+DEFAULT_DAILY_CALL_BUDGET = 60      # 초과 시 스폰 전에 거부 (§13, budget.py)
 DEFAULT_DENY_GLOBS = (".env*", "*_key*", "*token*", "*.pem", "*.chk", "*.wfn")
 
 VALID_EFFORTS = ("low", "medium", "high")
@@ -68,7 +68,7 @@ def find_project_root(cwd: Path | None = None) -> Path:
         if (candidate / ".git").exists():
             return candidate
     # .git이 없으면 CWD 자체를 루트로 삼는다. 상태 디렉터리가 경로 해시로
-    # 분리되므로 안전하며, 경고는 doctor(Phase 6)의 몫이다.
+    # 분리되므로 안전하며, 경고는 doctor의 몫이다.
     return current
 
 

@@ -20,7 +20,8 @@ class ContextError(ValueError):
 
 
 class ContextTooLarge(ContextError):
-    """인라이닝 합계가 상한을 초과. Phase 5의 전략 C가 이 경로를 이어받는다."""
+    """인라이닝 합계가 상한을 초과 (inline_files 전용 — auto 정책에서는
+    prepare_context가 초과분을 서빙으로 전환하므로 이 오류가 나지 않는다)."""
 
 
 # "경로" | "경로:행" | "경로:시작-끝". 콜론 뒤가 숫자가 아니면 경로의 일부로 본다.
