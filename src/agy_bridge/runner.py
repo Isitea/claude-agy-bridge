@@ -61,6 +61,17 @@ class AgyResult:
     raw: dict = field(repr=False)
 
 
+def ensure_prompt_within_argv_limit(prompt: str) -> None:
+    """E2BIG 사전 차단 (§2.3-D). 동기 경로와 job 스폰 경로가 공유한다."""
+    prompt_bytes = len(prompt.encode("utf-8"))
+    if prompt_bytes > ARGV_PROMPT_LIMIT_BYTES:
+        raise AgyError(
+            f"조립된 프롬프트가 {prompt_bytes:,} B로 argv 단일 인자 한계"
+            f"({ARGV_PROMPT_LIMIT_BYTES:,} B)를 넘는다 (§2.3-D). "
+            "인라이닝 상한이 지켜졌다면 발생할 수 없는 상태다 — 버그로 보고하라."
+        )
+
+
 def build_command(
     prompt: str,
     *,
@@ -97,13 +108,7 @@ def run_agy(
     json_schema: str | None = None,
 ) -> AgyResult:
     """agy를 동기 실행하고 결과를 파싱한다. 모든 실패는 AgyError로 승격된다."""
-    prompt_bytes = len(prompt.encode("utf-8"))
-    if prompt_bytes > ARGV_PROMPT_LIMIT_BYTES:
-        raise AgyError(
-            f"조립된 프롬프트가 {prompt_bytes:,} B로 argv 단일 인자 한계"
-            f"({ARGV_PROMPT_LIMIT_BYTES:,} B)를 넘는다 (§2.3-D). "
-            "인라이닝 상한이 지켜졌다면 발생할 수 없는 상태다 — 버그로 보고하라."
-        )
+    ensure_prompt_within_argv_limit(prompt)
 
     cmd = build_command(
         prompt,
@@ -135,10 +140,24 @@ def run_agy(
             "프로세스 그룹을 종료했다 (§5 타임아웃 계층 3)."
         ) from None
 
-    if process.returncode != 0:
+    return parse_agy_output(stdout, stderr, returncode=process.returncode)
+
+
+def parse_agy_output(
+    stdout: str,
+    stderr: str,
+    returncode: int | None = None,
+) -> AgyResult:
+    """agy 출력을 AgyResult로 파싱한다. 모든 실패는 AgyError로 승격된다.
+
+    동기 경로(run_agy)와 비동기 job 종결자(jobs.py)가 공유한다 — 실패 승격
+    규칙(§2.3-A)이 두 경로에서 갈라지면 안 되기 때문이다. returncode=None은
+    브리지 재시작 후 고아 job 회수처럼 종료 코드를 알 수 없는 경우다.
+    """
+    if returncode is not None and returncode != 0:
         raise AgyError(
             "agy가 0이 아닌 코드로 종료했다.",
-            returncode=process.returncode,
+            returncode=returncode,
             stdout=stdout,
             stderr=stderr,
         )
@@ -148,7 +167,7 @@ def run_agy(
     except json.JSONDecodeError as exc:
         raise AgyError(
             f"agy stdout이 JSON이 아니다: {exc}",
-            returncode=process.returncode,
+            returncode=returncode,
             stdout=stdout,
             stderr=stderr,
         ) from exc
@@ -157,7 +176,7 @@ def run_agy(
     if status != "SUCCESS":
         raise AgyError(
             f"agy status={status!r} (SUCCESS 아님).",
-            returncode=process.returncode,
+            returncode=returncode,
             stdout=stdout,
             stderr=stderr,
         )
@@ -169,7 +188,7 @@ def run_agy(
         raise AgyError(
             "agy가 status=SUCCESS를 반환했지만 response가 비어 있다. "
             "헤드리스 권한 자동 거부(§2.3-A)일 가능성이 높다 — stderr를 확인하라.",
-            returncode=process.returncode,
+            returncode=returncode,
             stdout=stdout,
             stderr=stderr,
         )

@@ -37,6 +37,7 @@ def fake_agy(tmp_path: Path):
         *,
         returncode: int = 0,
         stderr: str = "",
+        sleep_seconds: float = 0,
         name: str = "fake-agy",
     ) -> Path:
         stdout = payload if isinstance(payload, str) else json.dumps(payload)
@@ -45,8 +46,7 @@ def fake_agy(tmp_path: Path):
             textwrap.dedent(
                 f"""\
                 #!/bin/sh
-                cat >/dev/null 2>&1 <<'NOTHING'
-                NOTHING
+                sleep {sleep_seconds}
                 printf '%s' {_sh_quote(stderr)} >&2
                 printf '%s' {_sh_quote(stdout)}
                 exit {returncode}
