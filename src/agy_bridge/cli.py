@@ -52,8 +52,27 @@ def main(argv: list[str] | None = None) -> int:
         from agy_bridge.server import serve
 
         return serve()
+    if args.command == "budget":
+        return _budget()
     print(f"agy-bridge {args.command}: {_PHASE_HINT}", file=sys.stderr)
     return 2
+
+
+def _budget() -> int:
+    import json
+
+    from agy_bridge.budget import Ledger
+    from agy_bridge.config import StartupError, load_config
+
+    try:
+        config = load_config()
+    except StartupError as exc:
+        print(f"agy-bridge: {exc}", file=sys.stderr)
+        return 1
+    report = Ledger(config).report(config.daily_call_budget)
+    report["project_root"] = str(config.project_root)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":

@@ -17,11 +17,13 @@ import anyio
 from mcp.server.mcpserver import MCPServer
 
 from agy_bridge import __version__
+from agy_bridge.budget import Ledger
 from agy_bridge.config import Config, StartupError, load_config
-from agy_bridge.context import inline_files
+from agy_bridge.context import PreparedContext, prepare_context
 from agy_bridge.jobs import TERMINAL_STATES, JobRecord, JobRegistry, UnknownJob
 from agy_bridge.prompts import assemble_prompt, compose_playbooks_block
 from agy_bridge.schemas import structured_default, verdict_schema_json
+from agy_bridge.serve import ContextServer
 from agy_bridge.sessions import SessionStore
 
 Mode = Literal["review", "verify", "derive", "literature", "design"]
@@ -46,7 +48,10 @@ wait_seconds(기본 45초) 안에 끝나면 결과를 바로 받고, 넘어가�
 직접 검토하라.
 
 files: 검토 대상을 "경로" 또는 "경로:시작-끝" 행범위로 지정한다 (프로젝트 루트 기준).
-    전체가 프롬프트에 인라이닝되며 합계 상한은 100,000자다. 넘으면 행범위를 좁혀라.
+    **순서가 우선순위다** — 앞에서부터 100,000자 인라이닝 예산에 담고, 넘치는
+    파일부터는 루프백 HTTP 서빙으로 자동 전환된다(auto). 검토 대상을 앞에,
+    주변 자료(문헌, 로그, 큰 모듈)를 뒤에 두라. 전환 시 결과에 context_strategy와
+    사유가 명시된다. 서빙은 지연이 크기에 비례한다(600 KB ≈ 46 s, 2 MB ≈ 100 s).
 context: 물리 설정, 단위계, 가정, 경계조건 등 코드만으로 알 수 없는 정보.
     검증 품질은 여기서 갈린다 — 이론 수준, 온도·압력 조건, 반응계 성격을 담아라.
 session_id: 같은 주제의 연속 질문에는 같은 session_id를 재사용하라 — 캐시 히트로
@@ -87,6 +92,14 @@ close는 브리지의 매핑만 제거한다 — agy 쪽 대화 기록 자체는
 """
 
 
+def _attach_strategy(payload: dict, record: JobRecord) -> None:
+    """auto 전환이 일어났으면 전환 사실과 사유를 도구 결과에 명시한다 (§4.3)."""
+    if record.strategy != "inline":
+        payload["context_strategy"] = record.strategy
+        payload["context_note"] = record.strategy_reason
+        payload["served"] = record.served
+
+
 def build_server(config: Config) -> MCPServer:
     server = MCPServer(
         name="agy-bridge",
@@ -99,9 +112,16 @@ def build_server(config: Config) -> MCPServer:
     )
 
     sessions = SessionStore(config)
+    ledger = Ledger(config)
 
     def _on_complete(record: JobRecord, result) -> None:
-        if record.session_id:
+        ledger.record_finish(
+            record.job_id,
+            state=record.state,
+            usage=result.usage if result is not None else None,
+            duration_seconds=result.duration_seconds if result is not None else None,
+        )
+        if result is not None and record.session_id:
             sessions.record_use(
                 record.session_id,
                 conversation_id=result.conversation_id,
@@ -129,9 +149,10 @@ def build_server(config: Config) -> MCPServer:
                 payload["session_id"] = record.session_id
             if record.result.get("structured_output") is not None:
                 payload["verdict"] = record.result["structured_output"]
+            _attach_strategy(payload, record)
             return payload
         if record.state == "running":
-            return {
+            payload = {
                 "status": "running",
                 "job_id": record.job_id,
                 "elapsed_s": record.elapsed_s(),
@@ -141,6 +162,8 @@ def build_server(config: Config) -> MCPServer:
                     "다른 작업을 계속하라."
                 ),
             }
+            _attach_strategy(payload, record)
+            return payload
         if record.state == "cancelled":
             return {
                 "status": "cancelled",
@@ -149,6 +172,35 @@ def build_server(config: Config) -> MCPServer:
             }
         # failed | timeout — 실패는 조용히 넘어가지 않는다 (§2.3-A)
         raise RuntimeError(f"job {record.job_id} {record.state}: {record.error}")
+
+    def _served_block(server: ContextServer, prepared: PreparedContext) -> str:
+        lines = [
+            "--- 추가 자료 (루프백 HTTP 서빙) ---",
+            "아래 파일은 크기 때문에 프롬프트에 싣지 않고 로컬 URL로 제공한다.",
+            (
+                "이 환경에서 셸 명령 실행(curl, grep 등)은 권한이 없어 조용히 "
+                "실패한다 — 절대 시도하지 마라. 반드시 내장 URL fetch(웹 읽기) "
+                "도구로 아래 URL을 직접 읽어라. 필요하면 여러 번 나눠 읽어도 된다."
+            ),
+            (
+                "인라이닝과 동일하게 각 행 앞에 원본 절대 행 번호가 붙어 있다."
+            ),
+            f"목록: {server.url_for('INDEX')}",
+        ]
+        for item in prepared.served_manifest:
+            names = item["serve_names"]
+            if len(names) == 1:
+                lines.append(
+                    f"- {item['file']} [{item['lines']}행]: "
+                    f"{server.url_for(names[0])}"
+                )
+            else:
+                lines.append(
+                    f"- {item['file']} [{item['lines']}행] — {len(names)}개 부분으로 "
+                    "분할됨. 답하기 전에 아래 부분 URL을 **하나도 빠짐없이** 읽어라:"
+                )
+                lines.extend(f"  {server.url_for(name)}" for name in names)
+        return "\n".join(lines)
 
     def _start_and_wait(
         *,
@@ -163,37 +215,62 @@ def build_server(config: Config) -> MCPServer:
         wait_seconds: float | None,
         structured: bool,
     ) -> dict:
-        files_block, manifest = "", []
+        # 예산 확인은 스폰 전에 한다 — 프로세스가 뜬 뒤 거부하면 이미 비용이 나갔다
+        ledger.check_budget(config.daily_call_budget)
+
+        prepared: PreparedContext | None = None
         if files:
-            files_block, manifest = inline_files(
+            prepared = prepare_context(
                 files,
                 project_root=config.project_root,
                 deny_globs=config.deny_globs,
                 max_chars=config.max_inline_chars,
             )
-        prompt = assemble_prompt(
-            mode=mode,
-            question=question,
-            context=context,
-            files_block=files_block,
-            playbooks_block=compose_playbooks_block(
-                mode,
-                project_root=config.project_root,
-                overlay_dir=config.overlay_dir,
-                enabled=config.playbooks_enabled,
-            ),
-            structured=structured,
-        )
-        record = registry.start(
-            prompt,
-            mode=mode,
-            question=question,
-            session_id=session_id,
-            conversation_id=conversation_id,
-            model=model,
-            effort=effort,
-            json_schema=verdict_schema_json() if structured else None,
-            reviewed=manifest,
+
+        context_server: ContextServer | None = None
+        try:
+            files_block = prepared.files_block if prepared else ""
+            if prepared and prepared.to_serve:
+                context_server = ContextServer(prepared.to_serve)
+                block = _served_block(context_server, prepared)
+                files_block = f"{files_block}\n\n{block}" if files_block else block
+
+            prompt = assemble_prompt(
+                mode=mode,
+                question=question,
+                context=context,
+                files_block=files_block,
+                playbooks_block=compose_playbooks_block(
+                    mode,
+                    project_root=config.project_root,
+                    overlay_dir=config.overlay_dir,
+                    enabled=config.playbooks_enabled,
+                ),
+                structured=structured,
+            )
+            record = registry.start(
+                prompt,
+                mode=mode,
+                question=question,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                model=model,
+                effort=effort,
+                json_schema=verdict_schema_json() if structured else None,
+                reviewed=prepared.inline_manifest if prepared else [],
+                served=prepared.served_manifest if prepared else [],
+                strategy=prepared.strategy if prepared else "inline",
+                strategy_reason=prepared.reason if prepared else None,
+                context_server=context_server,
+            )
+        except Exception:
+            # registry.start에 도달하지 못한 실패 경로에서도 서버를 남기지 않는다
+            if context_server is not None:
+                context_server.close()
+            raise
+
+        ledger.record_start(
+            record.job_id, mode=mode, model=model or config.model
         )
         window = config.wait_seconds if wait_seconds is None else wait_seconds
         record = registry.wait(record.job_id, window)
