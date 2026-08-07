@@ -1,16 +1,51 @@
-"""역할별 프롬프트 템플릿과 조립 (§4.5, §8).
+"""역할별 프롬프트 템플릿, 검증 플레이북 로딩, 프롬프트 조립 (§4.5, §8).
 
-조립 순서: _common.md(역할 규약) → [내장 플레이북·오버레이: Phase 4] → mode별 지시
-→ 인라이닝된 파일 → 호출별 context → 질문.
+조립 순서: _common.md(역할 규약) → 내장 플레이북 → 프로젝트 오버레이
+→ mode별 지시 → 인라이닝된 파일 → 호출별 context → 질문.
 
-브리지 안의 모든 선택은 테이블 조회다 (§3.1) — mode → 지시문 매핑은 정적 사전이다.
+브리지 안의 모든 선택은 테이블 조회다 (§3.1) — mode → 지시문/플레이북 매핑은
+정적 사전이며, 플레이북 매핑은 설정([playbooks] enabled)으로 덮어쓸 수 있다.
+
+플레이북 배치 전략 (§8.1): 패키지에 동봉하고 프롬프트에 직접 주입한다.
+agy 쪽에 설치할 것이 없어야 이식성(§1)이 유지된다. 오버레이(§8.6)는
+<project_root>/<overlay_dir>/*.md 를 자동 발견해 내장 플레이북 뒤에 덧붙인다.
 """
 
 from __future__ import annotations
 
 from importlib import resources
+from pathlib import Path
 
 MODES = ("review", "verify", "derive", "literature", "design")
+
+BUILTIN_PLAYBOOKS = (
+    "units-and-scales",
+    "assumption-validity",
+    "conservation-and-balance",
+    "uncertainty-propagation",
+    "numerics",
+    "derivation",
+    "data-provenance",
+)
+
+# 관심사 단위 매핑 (§8.5). 어떤 mode가 무엇을 실을지는 테이블 조회다.
+MODE_PLAYBOOKS: dict[str, tuple[str, ...]] = {
+    "review": (
+        "units-and-scales",
+        "assumption-validity",
+        "numerics",
+        "data-provenance",
+    ),
+    "verify": (
+        "units-and-scales",
+        "assumption-validity",
+        "conservation-and-balance",
+        "uncertainty-propagation",
+    ),
+    "derive": ("derivation", "units-and-scales"),
+    "literature": ("data-provenance",),
+    "design": ("numerics", "assumption-validity", "uncertainty-propagation"),
+}
 
 MODE_INSTRUCTIONS: dict[str, str] = {
     "review": (
@@ -46,6 +81,57 @@ def load_common() -> str:
     )
 
 
+def load_builtin_playbook(name: str) -> str:
+    if name not in BUILTIN_PLAYBOOKS:
+        raise ValueError(
+            f"알 수 없는 플레이북 {name!r}. 내장 목록: {list(BUILTIN_PLAYBOOKS)}"
+        )
+    return (
+        resources.files("agy_bridge")
+        .joinpath(f"playbooks/{name}.md")
+        .read_text(encoding="utf-8")
+    )
+
+
+def playbook_names_for_mode(
+    mode: str, enabled: tuple[str, ...] | None = None
+) -> tuple[str, ...]:
+    """설정의 enabled가 있으면 그것이 mode 매핑을 덮어쓴다 (§8.5)."""
+    if enabled is not None:
+        return tuple(enabled)
+    return MODE_PLAYBOOKS.get(mode, ())
+
+
+def discover_overlays(project_root: Path, overlay_dir: str) -> list[tuple[str, str]]:
+    """오버레이 (파일명, 내용) 목록 (§8.6). 파일명 순 정렬로 결정론을 유지한다."""
+    directory = project_root / overlay_dir
+    if not directory.is_dir():
+        return []
+    return [
+        (path.name, path.read_text(encoding="utf-8", errors="replace"))
+        for path in sorted(directory.glob("*.md"))
+    ]
+
+
+def compose_playbooks_block(
+    mode: str,
+    *,
+    project_root: Path,
+    overlay_dir: str,
+    enabled: tuple[str, ...] | None = None,
+) -> str:
+    """내장 플레이북 + 오버레이를 하나의 프롬프트 블록으로 조립한다. 없으면 ''."""
+    parts = [
+        load_builtin_playbook(name).strip()
+        for name in playbook_names_for_mode(mode, enabled)
+    ]
+    for filename, text in discover_overlays(project_root, overlay_dir):
+        stripped = text.strip()
+        if stripped:
+            parts.append(f"<!-- 프로젝트 오버레이: {filename} -->\n{stripped}")
+    return "\n\n".join(parts)
+
+
 # 구조화 호출에서 산문 출력을 차단하는 지시 (§4.4). agy의 --json-schema 강제는
 # 프롬프트 수준이라, 검토 지시가 산문을 유도하면 스키마가 무시되는 것을 실측으로
 # 확인했다 (Phase 3). 프롬프트와 스키마가 같은 방향을 가리키게 만든다.
@@ -64,12 +150,15 @@ def assemble_prompt(
     question: str,
     context: str = "",
     files_block: str = "",
+    playbooks_block: str = "",
     structured: bool = False,
 ) -> str:
     if mode not in MODES:
         raise ValueError(f"mode는 {MODES} 중 하나여야 한다: {mode!r}")
 
     parts = [load_common().strip()]
+    if playbooks_block:
+        parts.append("## 검증 플레이북 (반드시 점검할 항목)\n\n" + playbooks_block)
     parts.append(f"## 검토 지시 (mode={mode})\n\n{MODE_INSTRUCTIONS[mode]}")
     if files_block:
         parts.append(

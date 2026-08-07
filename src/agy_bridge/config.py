@@ -48,6 +48,9 @@ class Config:
     hard_kill_seconds: int = DEFAULT_HARD_KILL_SECONDS
     daily_call_budget: int = DEFAULT_DAILY_CALL_BUDGET
     deny_globs: tuple[str, ...] = DEFAULT_DENY_GLOBS
+    # None이면 mode → 플레이북 정적 매핑을 쓴다. 값이 있으면 그것으로 덮어쓴다 (§8.5).
+    playbooks_enabled: tuple[str, ...] | None = None
+    overlay_dir: str = ".agy-bridge/playbooks"  # 프로젝트 오버레이 위치 (§8.6)
 
 
 def find_project_root(cwd: Path | None = None) -> Path:
@@ -111,6 +114,7 @@ def load_config(cwd: Path | None = None) -> Config:
 
     limits = raw.get("limits", {})
     context = raw.get("context", {})
+    playbooks = raw.get("playbooks", {})
     env = os.environ
 
     model = raw.get("model") or env.get("AGY_BRIDGE_MODEL") or DEFAULT_MODEL
@@ -139,4 +143,8 @@ def load_config(cwd: Path | None = None) -> Config:
         hard_kill_seconds=int(limits.get("hard_kill_seconds", DEFAULT_HARD_KILL_SECONDS)),
         daily_call_budget=int(limits.get("daily_call_budget", DEFAULT_DAILY_CALL_BUDGET)),
         deny_globs=deny_globs,
+        playbooks_enabled=(
+            tuple(playbooks["enabled"]) if "enabled" in playbooks else None
+        ),
+        overlay_dir=playbooks.get("overlay_dir", ".agy-bridge/playbooks"),
     )

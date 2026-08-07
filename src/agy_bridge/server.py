@@ -20,7 +20,7 @@ from agy_bridge import __version__
 from agy_bridge.config import Config, StartupError, load_config
 from agy_bridge.context import inline_files
 from agy_bridge.jobs import TERMINAL_STATES, JobRecord, JobRegistry, UnknownJob
-from agy_bridge.prompts import assemble_prompt
+from agy_bridge.prompts import assemble_prompt, compose_playbooks_block
 from agy_bridge.schemas import structured_default, verdict_schema_json
 from agy_bridge.sessions import SessionStore
 
@@ -176,6 +176,12 @@ def build_server(config: Config) -> MCPServer:
             question=question,
             context=context,
             files_block=files_block,
+            playbooks_block=compose_playbooks_block(
+                mode,
+                project_root=config.project_root,
+                overlay_dir=config.overlay_dir,
+                enabled=config.playbooks_enabled,
+            ),
             structured=structured,
         )
         record = registry.start(
