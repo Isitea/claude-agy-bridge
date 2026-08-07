@@ -23,23 +23,36 @@ MCP 브리지. 시뮬레이션·수치 코드의 열역학 처리, 단위계, �
 ## 설치
 
 ```bash
-uv tool install --from /path/to/claude-agy-bridge agy-bridge
-#  → ~/.local/bin/agy-bridge 생성. 대상 저장소는 이 이름만 참조한다.
+curl -fsSL https://raw.githubusercontent.com/Isitea/claude-agy-bridge/main/install.sh | bash
+#  → uv가 없으면 함께 설치하고, ~/.local/bin/agy-bridge 를 만든다.
+#    대상 저장소는 이 이름만 참조한다. 재실행해도 안전하다.
 
-# 업데이트는 재설치로:
-uv tool install --force --from /path/to/claude-agy-bridge agy-bridge
+# 이후 업데이트:
+agy-bridge update
+```
+
+수동 설치를 원하면 (동일한 결과):
+
+```bash
+uv tool install --from git+https://github.com/Isitea/claude-agy-bridge agy-bridge
+# 개발 중 로컬 체크아웃에서: uv tool install --force --from /path/to/checkout agy-bridge
 ```
 
 ## 대상 저장소 등록
 
 ```bash
-agy-bridge init --target /path/to/target-repo
+cd /path/to/target-repo
+agy-bridge init          # --target 생략 시 현재 디렉터리의 git 루트가 대상
 ```
 
 수행 내용: `.mcp.json`에 `mcpServers.agy` 등록(기존 항목 보존), 주석 처리된
 `.agy-bridge.toml` 템플릿 생성, `.agy-bridge/playbooks/` 오버레이 자리 생성,
 agy 바이너리 확인, 스모크 왕복 1회(저비용 모델)로 인증 검증.
-끝으로 `CLAUDE.md`에 넣을 사용 지침 스니펫을 **제안만** 한다(자동으로 쓰지 않음).
+끝으로 `CLAUDE.md` 사용 지침 스니펫 반영 여부를 **물어본다** — 대화형에서 `y`로
+승인하면 추가·갱신하고(기존 절은 교체해 중복 방지), `--claude-md` 플래그로
+묻지 않고 반영할 수도 있다. 비대화형에서는 제안만 출력한다. 브리지 업데이트 후
+`agy-bridge init`을 다시 실행하면 스니펫 최신화에도 쓸 수 있다(설정·오버레이는
+보존됨).
 
 문제가 생기면 대상 저장소에서:
 

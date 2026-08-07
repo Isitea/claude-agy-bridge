@@ -99,10 +99,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser(
         "init", help="대상 저장소에 .mcp.json 등록 + .agy-bridge.toml 생성"
     )
-    p_init.add_argument("--target", required=True, help="대상 저장소 경로")
+    p_init.add_argument(
+        "--target",
+        help="대상 저장소 경로 (생략 시 현재 디렉터리의 git 루트)",
+    )
     p_init.add_argument("--profile", help="AGY_BRIDGE_PROFILE 환경변수로 기록할 이름")
     p_init.add_argument(
         "--no-smoke", action="store_true", help="스모크 호출(실제 agy 1회) 생략"
+    )
+    p_init.add_argument(
+        "--claude-md",
+        action="store_true",
+        help="묻지 않고 CLAUDE.md에 사용 지침 스니펫을 반영",
+    )
+
+    sub.add_parser(
+        "update", help="설치된 브리지를 최신으로 갱신 (uv tool upgrade 위임)"
     )
 
     p_doctor = sub.add_parser(
@@ -129,7 +141,36 @@ def main(argv: list[str] | None = None) -> int:
         return _init(args)
     if args.command == "doctor":
         return _doctor(args)
+    if args.command == "update":
+        return _update()
     raise AssertionError(f"등록되지 않은 서브커맨드: {args.command}")
+
+
+# ── update ──────────────────────────────────────────────
+
+
+def _update() -> int:
+    """uv tool upgrade에 위임한다 — uv가 설치 receipt(git/경로 소스)를 기억한다."""
+    import shutil
+    import subprocess
+
+    if shutil.which("uv") is None:
+        print(
+            "agy-bridge update: uv를 찾을 수 없다. 설치 스크립트로 복구하라:\n"
+            "  curl -fsSL https://raw.githubusercontent.com/Isitea/"
+            "claude-agy-bridge/main/install.sh | bash",
+            file=sys.stderr,
+        )
+        return 1
+    proc = subprocess.run(["uv", "tool", "upgrade", "agy-bridge"], check=False)
+    if proc.returncode != 0:
+        print(
+            "agy-bridge update: 갱신 실패. 설치 스크립트로 재설치하면 해결된다:\n"
+            "  curl -fsSL https://raw.githubusercontent.com/Isitea/"
+            "claude-agy-bridge/main/install.sh | bash",
+            file=sys.stderr,
+        )
+    return proc.returncode
 
 
 # ── budget ──────────────────────────────────────────────
@@ -154,9 +195,18 @@ def _budget() -> int:
 
 
 def _init(args) -> int:
-    from agy_bridge.config import StartupError, find_agy_bin, load_config
+    from agy_bridge.config import (
+        StartupError,
+        find_agy_bin,
+        find_project_root,
+        load_config,
+    )
 
-    target = Path(args.target).expanduser().resolve()
+    if args.target:
+        target = Path(args.target).expanduser().resolve()
+    else:
+        target = find_project_root()
+        print(f"대상: {target} (현재 디렉터리 기준 자동 판정 — 다른 곳이면 --target 지정)")
     if not target.is_dir():
         print(f"agy-bridge init: 대상이 디렉터리가 아니다: {target}", file=sys.stderr)
         return 1
@@ -166,7 +216,7 @@ def _init(args) -> int:
     except StartupError as exc:
         print(f"agy-bridge init: {exc}", file=sys.stderr)
         return 1
-    print(f"[1/5] agy 바이너리: {agy_bin}")
+    print(f"[1/6] agy 바이너리: {agy_bin}")
 
     # .mcp.json 병합 — 기존 서버 항목은 보존한다
     mcp_path = target / ".mcp.json"
@@ -187,15 +237,15 @@ def _init(args) -> int:
     mcp_path.write_text(
         json.dumps(mcp_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    print(f"[2/5] {mcp_path} 에 mcpServers.agy 등록")
+    print(f"[2/6] {mcp_path} 에 mcpServers.agy 등록")
 
     # 설정 템플릿 — 있으면 덮어쓰지 않는다
     config_path = target / ".agy-bridge.toml"
     if config_path.exists():
-        print(f"[3/5] {config_path} 이미 존재 — 유지")
+        print(f"[3/6] {config_path} 이미 존재 — 유지")
     else:
         config_path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
-        print(f"[3/5] {config_path} 생성 (전 항목 주석 = 내장 기본값)")
+        print(f"[3/6] {config_path} 생성 (전 항목 주석 = 내장 기본값)")
 
     # 오버레이 자리 (§8.6)
     overlay_dir = target / ".agy-bridge" / "playbooks"
@@ -203,21 +253,55 @@ def _init(args) -> int:
     template_path = overlay_dir / "_TEMPLATE.md"
     if not template_path.exists():
         template_path.write_text(OVERLAY_TEMPLATE, encoding="utf-8")
-    print(f"[4/5] {overlay_dir} 오버레이 자리 생성 (_TEMPLATE.md는 주입되지 않음)")
+    print(f"[4/6] {overlay_dir} 오버레이 자리 생성 (_TEMPLATE.md는 주입되지 않음)")
 
     # 스모크 — 인증과 왕복을 실제로 확인 (§7.3). 판정은 response 비어있지 않음 (§9)
     if args.no_smoke:
-        print("[5/5] 스모크 생략 (--no-smoke)")
+        print("[5/6] 스모크 생략 (--no-smoke)")
     else:
         error = _smoke(load_config(target))
         if error:
-            print(f"[5/5] 스모크 실패: {error}", file=sys.stderr)
+            print(f"[5/6] 스모크 실패: {error}", file=sys.stderr)
             return 1
-        print(f"[5/5] 스모크 통과 ({SMOKE_MODEL} 왕복, 응답 비어있지 않음)")
+        print(f"[5/6] 스모크 통과 ({SMOKE_MODEL} 왕복, 응답 비어있지 않음)")
 
-    print("\n제안: 대상 저장소 CLAUDE.md에 아래 스니펫 추가를 검토하라 (자동으로 쓰지 않는다):\n")
-    print(CLAUDE_MD_SNIPPET)
+    # CLAUDE.md — 승인 없이는 쓰지 않는다 (§9-4). --claude-md 플래그 또는
+    # 대화형 y 응답이 승인이다. 비대화형(파이프·CI)에서는 종전대로 제안만 한다.
+    wrote = None
+    if args.claude_md:
+        wrote = _apply_claude_md(target)
+    elif sys.stdin.isatty():
+        answer = input("CLAUDE.md에 사용 지침 스니펫을 반영할까요? [y/N] ")
+        if answer.strip().lower() in ("y", "yes"):
+            wrote = _apply_claude_md(target)
+    if wrote:
+        print(f"[6/6] CLAUDE.md 스니펫 {wrote}")
+    else:
+        print("[6/6] CLAUDE.md 미변경 — 아래 스니펫 추가를 검토하라:\n")
+        print(CLAUDE_MD_SNIPPET)
     return 0
+
+
+_SNIPPET_HEADER = "## 과학 검증 (agy_consult)"
+
+
+def _apply_claude_md(target: Path) -> str:
+    """스니펫을 CLAUDE.md에 반영한다. 기존 절이 있으면 교체해 중복을 막는다."""
+    import re
+
+    path = target / "CLAUDE.md"
+    if not path.is_file():
+        path.write_text(CLAUDE_MD_SNIPPET, encoding="utf-8")
+        return "생성 (CLAUDE.md 새로 만듦)"
+    text = path.read_text(encoding="utf-8")
+    if _SNIPPET_HEADER in text:
+        pattern = re.compile(
+            rf"{re.escape(_SNIPPET_HEADER)}.*?(?=^## |\Z)", re.DOTALL | re.MULTILINE
+        )
+        path.write_text(pattern.sub(CLAUDE_MD_SNIPPET + "\n", text), encoding="utf-8")
+        return "교체 (기존 절 갱신)"
+    path.write_text(text.rstrip() + "\n\n" + CLAUDE_MD_SNIPPET, encoding="utf-8")
+    return "추가"
 
 
 def _smoke(config) -> str | None:
