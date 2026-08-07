@@ -24,12 +24,16 @@ MCP 브리지. 시뮬레이션·수치 코드의 열역학 처리, 단위계, �
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Isitea/claude-agy-bridge/main/install.sh | bash
-#  → uv가 없으면 함께 설치하고, ~/.local/bin/agy-bridge 를 만든다.
-#    대상 저장소는 이 이름만 참조한다. 재실행해도 안전하다.
+#  → ~/.local/bin/agy-bridge 를 만든다. 대상 저장소는 이 이름만 참조한다.
+#    재실행해도 안전하다. uv가 없으면 아무것도 바꾸지 않고 설치 안내만
+#    출력하고 중단한다 (사전 작업 표의 uv는 필수 요건).
 
 # 이후 업데이트:
 agy-bridge update
 ```
+
+> 저장소가 비공개인 동안 위 curl은 404가 난다. 인증된 대안:
+> `gh api repos/Isitea/claude-agy-bridge/contents/install.sh -H "Accept: application/vnd.github.raw" | bash`
 
 수동 설치를 원하면 (동일한 결과):
 

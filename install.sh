@@ -14,11 +14,14 @@ REF="${AGY_BRIDGE_REF:-main}"
 info() { printf '\033[1;34m[agy-bridge]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[agy-bridge]\033[0m %s\n' "$*" >&2; }
 
-# 1. uv — 없으면 공식 설치 스크립트로 조달
+# 1. uv — 없으면 설치하지 않는다. 이 스크립트는 agy-bridge 외의 도구를
+#    대신 설치해 사용자 환경을 바꾸지 않는다. 부족한 도구는 요청하고 중단한다.
 if ! command -v uv >/dev/null 2>&1; then
-  info "uv가 없어 설치합니다 (astral.sh 공식 스크립트)"
-  curl -fsSL https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$PATH"
+  warn "uv가 없습니다. 이 스크립트는 다른 도구를 대신 설치하지 않습니다."
+  warn "uv를 먼저 설치한 뒤 다시 실행하세요. 예:"
+  warn "  curl -LsSf https://astral.sh/uv/install.sh | sh   # astral 공식"
+  warn "  (또는 mise, 배포판 패키지 매니저 등 선호하는 방법)"
+  exit 1
 fi
 
 # 2. 브리지 설치·갱신 (--force 라 기존 설치 위에 덮어쓴다)
