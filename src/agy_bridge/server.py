@@ -21,6 +21,7 @@ from agy_bridge.config import Config, StartupError, load_config
 from agy_bridge.context import inline_files
 from agy_bridge.jobs import TERMINAL_STATES, JobRecord, JobRegistry, UnknownJob
 from agy_bridge.prompts import assemble_prompt
+from agy_bridge.schemas import structured_default, verdict_schema_json
 from agy_bridge.sessions import SessionStore
 
 Mode = Literal["review", "verify", "derive", "literature", "design"]
@@ -52,6 +53,10 @@ session_id: 같은 주제의 연속 질문에는 같은 session_id를 재사용�
     저렴해지고 검증자가 앞선 논의를 기억한다. 처음 쓰는 id면 새 세션이 생긴다.
 mode: review(수치 코드 검토) | verify(주장 판정) | derive(유도 점검) |
     literature(표준 기법 확인) | design(선택지 비교).
+structured: mode=verify는 기본으로 구조화 판정을 강제하고 결과의 verdict 필드
+    (verdict/summary/issues/confidence/assumptions_made)로 반환한다.
+    verdict가 insufficient_context면 검증자가 맥락 부족을 선언한 것이다 —
+    context를 보강해 재시도하라.
 """
 
 RESULT_DESCRIPTION = """\
@@ -156,6 +161,7 @@ def build_server(config: Config) -> MCPServer:
         session_id: str | None,
         conversation_id: str | None,
         wait_seconds: float | None,
+        structured: bool,
     ) -> dict:
         files_block, manifest = "", []
         if files:
@@ -166,7 +172,11 @@ def build_server(config: Config) -> MCPServer:
                 max_chars=config.max_inline_chars,
             )
         prompt = assemble_prompt(
-            mode=mode, question=question, context=context, files_block=files_block
+            mode=mode,
+            question=question,
+            context=context,
+            files_block=files_block,
+            structured=structured,
         )
         record = registry.start(
             prompt,
@@ -176,6 +186,7 @@ def build_server(config: Config) -> MCPServer:
             conversation_id=conversation_id,
             model=model,
             effort=effort,
+            json_schema=verdict_schema_json() if structured else None,
             reviewed=manifest,
         )
         window = config.wait_seconds if wait_seconds is None else wait_seconds
@@ -194,6 +205,7 @@ def build_server(config: Config) -> MCPServer:
         effort: Effort | None = None,
         session_id: str | None = None,
         wait_seconds: float | None = None,
+        structured: bool | None = None,
     ) -> dict:
         conversation_id = None
         if session_id:
@@ -212,6 +224,7 @@ def build_server(config: Config) -> MCPServer:
                 session_id=session_id,
                 conversation_id=conversation_id,
                 wait_seconds=wait_seconds,
+                structured=structured_default(mode) if structured is None else structured,
             ),
             abandon_on_cancel=True,
         )
@@ -240,6 +253,7 @@ def build_server(config: Config) -> MCPServer:
         model: str | None = None,
         effort: Effort | None = None,
         wait_seconds: float | None = None,
+        structured: bool | None = None,
     ) -> dict:
         meta = sessions.resolve(session_id)
         if meta is None:
@@ -248,10 +262,11 @@ def build_server(config: Config) -> MCPServer:
                 f"세션 {session_id!r}를 모른다. 알려진 세션: {known}. "
                 "새 주제라면 agy_consult에 session_id를 주어 시작하라."
             )
+        resolved_mode = mode or meta.get("last_mode") or "review"
         return await anyio.to_thread.run_sync(
             partial(
                 _start_and_wait,
-                mode=mode or meta.get("last_mode") or "review",
+                mode=resolved_mode,
                 question=question,
                 files=files,
                 context=context,
@@ -260,6 +275,9 @@ def build_server(config: Config) -> MCPServer:
                 session_id=session_id,
                 conversation_id=meta.get("conversation_id"),
                 wait_seconds=wait_seconds,
+                structured=structured_default(resolved_mode)
+                if structured is None
+                else structured,
             ),
             abandon_on_cancel=True,
         )

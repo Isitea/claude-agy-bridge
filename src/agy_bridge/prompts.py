@@ -46,12 +46,25 @@ def load_common() -> str:
     )
 
 
+# 구조화 호출에서 산문 출력을 차단하는 지시 (§4.4). agy의 --json-schema 강제는
+# 프롬프트 수준이라, 검토 지시가 산문을 유도하면 스키마가 무시되는 것을 실측으로
+# 확인했다 (Phase 3). 프롬프트와 스키마가 같은 방향을 가리키게 만든다.
+STRUCTURED_OUTPUT_INSTRUCTION = (
+    "## 출력 형식 (필수)\n\n"
+    "응답은 도구가 제공한 JSON 스키마를 따르는 **단일 JSON 객체**여야 한다. "
+    "마크다운, 산문, 코드펜스를 출력하지 마라. 검토 내용 전부를 스키마 필드에 담아라. "
+    "각 issue의 location은 `경로:행` 형식으로 쓰고, verdict가 insufficient_context면 "
+    "무엇이 더 필요한지 summary에 적어라."
+)
+
+
 def assemble_prompt(
     *,
     mode: str,
     question: str,
     context: str = "",
     files_block: str = "",
+    structured: bool = False,
 ) -> str:
     if mode not in MODES:
         raise ValueError(f"mode는 {MODES} 중 하나여야 한다: {mode!r}")
@@ -67,4 +80,6 @@ def assemble_prompt(
     if context.strip():
         parts.append("## 호출 컨텍스트 (물리 설정·가정·단위계)\n\n" + context.strip())
     parts.append("## 질문\n\n" + question.strip())
+    if structured:
+        parts.append(STRUCTURED_OUTPUT_INSTRUCTION)
     return "\n\n".join(parts)
