@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 가상환경 (mise python.uv_venv_auto 가 생성)
+.venv/
+
+# 도구 캐시
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# mise 로컬 오버라이드 (머신별 설정, 공유하지 않음)
+mise.local.toml
+.mise.local.toml
+
+# 브리지 런타임 상태 (프로젝트별 캐시에 저장되나 만약을 대비)
+.agy-bridge/state/
+
+# 외부 저장소를 벤더링하지 않는다. 아래는 로컬에만 두고 각자 내려받는다.
+# google-deepmind/science-skills (Apache 2.0) — 설치 방법은 docs/plan.md §9 참조
+.agents/plugins/

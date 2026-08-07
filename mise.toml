@@ -1,0 +1,17 @@
+[tools]
+# R12 실측 확정: 3.14.6에서 전 의존성 wheel 존재 + 스모크 14/14 통과 → 최상위 버전 유지.
+# (3.13.14 / 3.12.13도 동일하게 전부 통과했으나 상위 버전 우선 원칙에 따라 3.14 고정)
+python = "3.14"
+uv = "latest"
+node = "latest"
+
+[env]
+# 사내 프록시(<제품명>)가 github.com을 MITM한다. uv의 번들 webpki 루트에는
+# 이 CA가 없어 CPython 다운로드가 `invalid peer certificate: UnknownIssuer`로 실패한다.
+# 시스템 CA 저장소(/etc/ssl/certs/ca-certificates.crt)를 사용하게 해 정직하게 해결한다.
+# (인증서 검증을 끄는 것이 아니라, 시스템에 설치된 CA를 신뢰 목록에 포함시키는 것)
+UV_SYSTEM_CERTS = "1"
+
+[settings]
+github_attestations = false
+python.uv_venv_auto = "create|source"
