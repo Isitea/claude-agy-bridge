@@ -1,0 +1,1041 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-agy-bridge — MCP 설계</title>
+<style>
+  /* ── tokens: light (bare :root = complete palette) ───────────────── */
+  :root {
+    --ground:      #eceff1;
+    --surface:     #ffffff;
+    --surface-2:   #f4f7f7;
+    --ink:         #13202a;
+    --ink-soft:    #33454f;
+    --muted:       #5a6e79;
+    --rule:        #ccd7db;
+    --rule-soft:   #e0e8ea;
+    --accent:      #0c6a66;
+    --accent-ink:  #08514e;
+    --accent-soft: #dcefed;
+    --warn:        #93570f;
+    --warn-soft:   #f8ecda;
+    --danger:      #94303b;
+    --danger-soft: #f7e3e5;
+    --shadow:      0 1px 2px rgba(19,32,42,.05), 0 8px 24px -16px rgba(19,32,42,.28);
+
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    --sans: "Pretendard", "Pretendard Variable", -apple-system, BlinkMacSystemFont,
+            "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", system-ui, sans-serif;
+
+    --measure: 68ch;
+    --pad: clamp(1.25rem, 4vw, 3rem);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0c1216;
+      --surface:     #131c21;
+      --surface-2:   #18242a;
+      --ink:         #e2ebef;
+      --ink-soft:    #c2d1d8;
+      --muted:       #8ba0ab;
+      --rule:        #24333a;
+      --rule-soft:   #1c282e;
+      --accent:      #4fc8bd;
+      --accent-ink:  #7fdcd3;
+      --accent-soft: #10312f;
+      --warn:        #dda15e;
+      --warn-soft:   #2c2216;
+      --danger:      #e2737f;
+      --danger-soft: #2e1a1d;
+      --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #0c1216;
+    --surface:     #131c21;
+    --surface-2:   #18242a;
+    --ink:         #e2ebef;
+    --ink-soft:    #c2d1d8;
+    --muted:       #8ba0ab;
+    --rule:        #24333a;
+    --rule-soft:   #1c282e;
+    --accent:      #4fc8bd;
+    --accent-ink:  #7fdcd3;
+    --accent-soft: #10312f;
+    --warn:        #dda15e;
+    --warn-soft:   #2c2216;
+    --danger:      #e2737f;
+    --danger-soft: #2e1a1d;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+
+  /* ── base ─────────────────────────────────────────────────────────── */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.78;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px;
+  }
+  code, kbd { font-family: var(--mono); font-size: .875em; }
+
+  /* ── shell ────────────────────────────────────────────────────────── */
+  .shell { max-width: 1180px; margin: 0 auto; padding: 0 var(--pad) 6rem; }
+  .band  { max-width: 60rem; }
+  .prose { max-width: var(--measure); }
+
+  /* ── masthead ─────────────────────────────────────────────────────── */
+  header.masthead {
+    border-bottom: 1px solid var(--rule);
+    padding: clamp(3rem, 8vw, 5.5rem) 0 2.25rem;
+    display: flex; flex-direction: column; gap: 1.5rem;
+  }
+  .eyebrow {
+    font-family: var(--mono); font-size: .6875rem; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--accent-ink); margin: 0;
+  }
+  h1 {
+    font-size: clamp(1.9rem, 4.6vw, 3rem); line-height: 1.16; letter-spacing: -.022em;
+    font-weight: 700; margin: 0; text-wrap: balance; max-width: 20ch;
+  }
+  .standfirst {
+    margin: 0; max-width: 58ch; font-size: clamp(1rem, 2.3vw, 1.125rem);
+    color: var(--ink-soft); line-height: 1.7;
+  }
+  .masthead-meta {
+    display: flex; flex-wrap: wrap; gap: .5rem 1.75rem;
+    font-family: var(--mono); font-size: .75rem; color: var(--muted);
+    padding-top: .5rem; border-top: 1px solid var(--rule-soft);
+  }
+  .masthead-meta b { color: var(--ink-soft); font-weight: 500; }
+
+  /* ── sections ─────────────────────────────────────────────────────── */
+  section { padding-top: 3.75rem; }
+  .sec-head { display: flex; gap: 1rem; align-items: baseline; margin-bottom: 1.5rem; }
+  .sec-num {
+    font-family: var(--mono); font-size: .8125rem; color: var(--accent);
+    font-weight: 600; flex: none; padding-top: .15rem;
+  }
+  h2 {
+    font-size: clamp(1.3rem, 3vw, 1.6rem); line-height: 1.3; letter-spacing: -.015em;
+    margin: 0; font-weight: 650; text-wrap: balance;
+  }
+  h3 {
+    font-size: 1rem; font-weight: 650; margin: 2.25rem 0 .75rem;
+    letter-spacing: -.006em;
+  }
+  p { margin: 0 0 1.1rem; }
+  section > .prose > p:last-child, section > .prose > ul:last-child { margin-bottom: 0; }
+  ul, ol { margin: 0 0 1.1rem; padding-left: 1.25rem; }
+  li { margin-bottom: .4rem; }
+  li::marker { color: var(--muted); }
+  strong { font-weight: 650; }
+  .lead { font-size: 1.0625rem; color: var(--ink-soft); }
+
+  /* ── measured-fact chip: the doc's spine is measured vs proposed ──── */
+  .chip {
+    display: inline-block; font-family: var(--mono); font-size: .625rem;
+    letter-spacing: .1em; text-transform: uppercase; font-weight: 600;
+    padding: .15em .5em; border-radius: 2px; vertical-align: .12em;
+    background: var(--accent-soft); color: var(--accent-ink);
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  }
+  .chip.warn   { background: var(--warn-soft);   color: var(--warn);
+                 border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+  .chip.plain  { background: var(--surface-2);   color: var(--muted);
+                 border-color: var(--rule); }
+
+  /* ── cards / callouts ─────────────────────────────────────────────── */
+  .grid { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+          border-radius: 6px; overflow: hidden; }
+  .grid.two   { grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+  .grid.three { grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
+  .cell { background: var(--surface); padding: 1.1rem 1.25rem; display: flex;
+          flex-direction: column; gap: .35rem; }
+  .cell dt { font-family: var(--mono); font-size: .6875rem; letter-spacing: .11em;
+             text-transform: uppercase; color: var(--muted); margin: 0; }
+  .cell dd { margin: 0; font-size: .9375rem; line-height: 1.6; }
+  .cell dd b { font-weight: 650; }
+
+  .note {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent); border-radius: 0 5px 5px 0;
+    padding: 1rem 1.25rem; margin: 1.5rem 0; font-size: .9375rem; line-height: 1.7;
+  }
+  .note.trap   { border-left-color: var(--warn); }
+  .note.danger { border-left-color: var(--danger); }
+  .note > :last-child { margin-bottom: 0; }
+  .note-title {
+    font-weight: 650; font-size: .875rem; margin: 0 0 .4rem;
+    display: flex; align-items: center; gap: .55rem; flex-wrap: wrap;
+  }
+
+  /* ── tables ───────────────────────────────────────────────────────── */
+  .table-wrap { overflow-x: auto; margin: 1.5rem 0; border: 1px solid var(--rule);
+                border-radius: 6px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; min-width: 34rem; }
+  caption { caption-side: bottom; text-align: left; padding: .75rem 1rem 0;
+            font-size: .8125rem; color: var(--muted); }
+  th, td { text-align: left; padding: .7rem 1rem; border-bottom: 1px solid var(--rule-soft);
+           vertical-align: top; line-height: 1.6; }
+  thead th {
+    font-family: var(--mono); font-size: .6875rem; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600;
+    background: var(--surface-2); border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num, th.num { font-family: var(--mono); font-variant-numeric: tabular-nums;
+                   white-space: nowrap; }
+  td.key { font-family: var(--mono); font-size: .8125rem; color: var(--accent-ink);
+           white-space: nowrap; font-weight: 500; }
+
+  /* ── code ─────────────────────────────────────────────────────────── */
+  pre {
+    margin: 1.5rem 0; padding: 1rem 1.25rem; overflow-x: auto;
+    background: var(--surface-2); border: 1px solid var(--rule); border-radius: 6px;
+    font-family: var(--mono); font-size: .8125rem; line-height: 1.72; color: var(--ink-soft);
+    tab-size: 2;
+  }
+  pre b  { color: var(--accent-ink); font-weight: 600; }
+  pre i  { color: var(--muted); font-style: normal; }
+  pre em { color: var(--warn); font-style: normal; font-weight: 600; }
+
+  /* ── figures ──────────────────────────────────────────────────────── */
+  figure { margin: 2rem 0; }
+  .fig-frame {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
+    padding: 1.25rem; overflow-x: auto; box-shadow: var(--shadow);
+  }
+  figure svg { display: block; width: 100%; height: auto; min-width: 30rem; color: var(--ink); }
+  figcaption { font-size: .8125rem; color: var(--muted); margin-top: .75rem;
+               line-height: 1.65; max-width: 62ch; }
+  .svg-box   { fill: var(--surface-2); stroke: var(--rule); }
+  .svg-box-a { fill: var(--accent-soft); stroke: var(--accent); }
+  .svg-t     { fill: var(--ink); font-family: var(--sans); font-size: 13px; }
+  .svg-t.sm  { font-size: 11px; fill: var(--muted); font-family: var(--mono); }
+  .svg-t.mono{ font-family: var(--mono); font-size: 11.5px; fill: var(--ink-soft); }
+  .svg-t.acc { fill: var(--accent-ink); }
+  .svg-line  { stroke: var(--ink); stroke-width: 1.4; fill: none; }
+  .svg-line.faint { stroke: var(--muted); stroke-dasharray: 4 4; stroke-width: 1.2; }
+  .svg-line.acc   { stroke: var(--accent); stroke-width: 1.6; }
+
+  /* ── roadmap ──────────────────────────────────────────────────────── */
+  .phases { display: grid; gap: 1px; background: var(--rule);
+            border: 1px solid var(--rule); border-radius: 6px; overflow: hidden;
+            grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); margin: 1.5rem 0; }
+  .phase { background: var(--surface); padding: 1rem 1.1rem; display: flex;
+           flex-direction: column; gap: .4rem; }
+  .phase-n { font-family: var(--mono); font-size: .6875rem; letter-spacing: .1em;
+             color: var(--accent); font-weight: 600; }
+  .phase-t { font-weight: 650; font-size: .9375rem; line-height: 1.4; }
+  .phase-d { font-size: .8125rem; color: var(--muted); line-height: 1.6; }
+  .phase-g { font-size: .8125rem; color: var(--ink-soft); line-height: 1.6;
+             border-top: 1px dashed var(--rule); padding-top: .5rem; margin-top: auto; }
+
+  /* ── footer ───────────────────────────────────────────────────────── */
+  footer { margin-top: 4.5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule);
+           font-size: .8125rem; color: var(--muted); }
+  footer p { margin: 0 0 .4rem; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <header class="masthead">
+    <p class="eyebrow">MCP 서버 설계 · claude-agy-bridge</p>
+    <h1>Claude가 구현하고, Antigravity가 검증한다</h1>
+    <p class="standfirst">
+      계산과학 코드를 작성하는 Claude Code 세션이 도구 호출 한 번으로 Antigravity에게
+      물리·수치·유도 검증을 요청하는 MCP 서버. 완성 후 별도 저장소에 이식되는 것을 전제로 설계했다.
+    </p>
+    <div class="masthead-meta">
+      <span><b>상태</b> 설계 확정 · Phase 0 착수 전</span>
+      <span><b>런타임</b> Python 3.14 + uv</span>
+      <span><b>계약면</b> CLI 서브프로세스</span>
+      <span><b>개정</b> 2026-08-07</span>
+    </div>
+  </header>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>무엇을 만드는가</h2></div>
+    <div class="prose">
+      <p class="lead">
+        Claude Code는 구현을 맡고, Antigravity는 <strong>읽기 전용 자문·검증자</strong>로 붙는다.
+        API 키를 새로 관리하지 않기 위해, 두 CLI가 이미 OAuth 인증되어 있다는 사실을 그대로 이용한다.
+        계약면은 API가 아니라 <code>agy</code> 서브프로세스다.
+      </p>
+      <p>
+        설계를 지배하는 전제가 하나 있다. 이 저장소는 도구를 <em>만드는</em> 곳이고,
+        실제 사용은 <strong>다른 세션·다른 저장소</strong>에서 일어난다. 따라서 브리지는
+        자신의 설치 경로 밖 어떤 경로도 하드코딩하지 않으며, 이 설계 대화를 보지 못한
+        세션이 문서만 읽고 쓸 수 있어야 한다.
+      </p>
+    </div>
+
+    <div class="grid two band" style="margin-top:1.75rem">
+      <dl class="cell">
+        <dt>범위 안</dt>
+        <dd>과학적 자문 · 구조화된 검증 판정 · 맥락 유지 왕복 · 임의 저장소로의 이식</dd>
+      </dl>
+      <dl class="cell">
+        <dt>범위 밖</dt>
+        <dd>agy의 파일 <b>수정</b> · 역방향 브리지(agy → claude) · API 직접 호출 · Node.js</dd>
+      </dl>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>실측이 설계를 바꾼 지점</h2></div>
+    <div class="prose">
+      <p>
+        아래 값은 추정이 아니라 이 머신에서 <code>agy</code>를 직접 실행해 얻었다.
+        <span class="chip">실측</span> 표시가 붙은 것은 확인된 사실이고, 나머지는 그 위에 세운 설계 판단이다.
+      </p>
+    </div>
+
+    <div class="table-wrap band">
+      <table>
+        <thead>
+          <tr><th>확인 항목</th><th>결과</th><th class="num">설계 영향</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="key">--output-format json</td>
+            <td><code>{conversation_id, status, response, duration_seconds, usage}</code> 반환</td>
+            <td>파싱 계약 확정</td>
+          </tr>
+          <tr>
+            <td class="key">--conversation &lt;id&gt;</td>
+            <td>맥락 유지 확인. 재개 시 캐시 히트 <span class="num">12,206</span> 토큰</td>
+            <td>세션 재사용이 저렴</td>
+          </tr>
+          <tr>
+            <td class="key">--json-schema</td>
+            <td><code>structured_output</code>에 <b>파싱된 객체</b>로 반환</td>
+            <td>판정 스키마 강제 가능</td>
+          </tr>
+          <tr>
+            <td class="key">콜드스타트</td>
+            <td>총 13.6초 중 추론 2.9초 → 프로세스 오버헤드 <b>약 10초</b></td>
+            <td>드물고 굵게 묻기</td>
+          </tr>
+          <tr>
+            <td class="key">기본 입력 토큰</td>
+            <td>호출당 <b>약 17k</b> (agy 자체 시스템 프롬프트)</td>
+            <td>일일 호출 상한 도입</td>
+          </tr>
+        </tbody>
+      </table>
+      <caption>모든 행은 실행 결과에서 직접 옮겼다. 모델은 검증의 독립성을 위해 <code>gemini-3.1-pro-high</code>로 고정한다 — agy를 통해 Claude 모델을 부르면 "다른 관점의 검증"이라는 목적이 훼손된다.</caption>
+    </div>
+
+    <div class="note trap band">
+      <p class="note-title"><span class="chip warn">함정 A</span> 성공을 가장한 침묵</p>
+      <p>
+        헤드리스 <code>agy</code>는 파일 읽기 도구에 권한이 필요하면 <strong>프롬프트를 띄울 수 없어 자동 거부</strong>한다.
+        이때 stderr에는 안내가 나오지만, stdout의 JSON은 이렇게 온다:
+      </p>
+      <pre><i>stderr:</i> jetski: no output produced — a tool required the "command" permission…
+<i>stdout:</i> {"conversation_id":"…", <em>"status":"SUCCESS"</em>, <em>"response":""</em>, …}</pre>
+      <p style="margin-bottom:0">
+        <code>status</code>는 <code>SUCCESS</code>인데 응답은 비어 있다. 이것을 통과로 오독하면
+        <strong>검증받지 않은 코드가 검증된 것처럼 통과한다.</strong> 이 시스템에서 가능한 최악의 버그다.
+        → 브리지는 빈 <code>response</code>를 <b>오류로 승격</b>하고 stderr를 그대로 전달한다.
+        Phase 1의 최우선 회귀 테스트가 기능이 아니라 이 실패 모드인 이유다.
+      </p>
+    </div>
+
+    <div class="note trap band">
+      <p class="note-title"><span class="chip warn">함정 B</span> 커스터마이즈 탐색이 CWD에 묶여 있다</p>
+      <p style="margin-bottom:0">
+        agy는 <code>.agents/skills/</code>와 <code>AGENTS.md</code>를 <strong>CWD에서 저장소 루트까지 거슬러 올라가며</strong> 찾는다.
+        본 저장소에 과학 스킬을 두면 <b>대상 프로젝트에서는 로드되지 않는다.</b>
+        반대로 대상 저장소를 CWD로 삼으면 그쪽 <code>AGENTS.md</code>(대개 구현자용 지시)를 상속해 검토자 역할과 충돌한다.
+        → 스킬 파일 배치를 포기하고 <b>프롬프트 주입</b> 방식으로 간다(§05).
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>아키텍처</h2></div>
+    <div class="prose">
+      <p>
+        두 프로세스는 같은 파일시스템 위에 있다. 그런데 함정 A 때문에 agy에게 파일을 읽히는 경로는
+        기본값이 될 수 없다. 그래서 <strong>브리지가 파일을 읽어 프롬프트에 인라이닝</strong>한다 —
+        agy 쪽에 아무 권한 설정도 요구하지 않고, 결정론적이다.
+        다만 이 경로에는 실측으로 확인된 <strong>128 KiB 천장</strong>이 있고, 그 위로는 다른 길이 필요하다 (§05).
+      </p>
+    </div>
+
+    <figure class="band">
+      <div class="fig-frame">
+        <svg viewBox="0 0 800 330" role="img"
+             aria-label="Claude Code가 stdio JSON-RPC로 브리지를 호출하고, 브리지가 agy를 서브프로세스로 실행한다. 브리지는 파일시스템에서 직접 파일을 읽어 프롬프트에 넣으며, agy에서 파일시스템으로 가는 경로는 헤드리스 권한 거부 때문에 기본 경로가 아니다.">
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- Claude Code -->
+          <rect class="svg-box" x="16" y="46" width="170" height="118" rx="5"/>
+          <text class="svg-t" x="101" y="88" text-anchor="middle" font-weight="600">Claude Code</text>
+          <text class="svg-t sm" x="101" y="110" text-anchor="middle">MCP 클라이언트</text>
+          <text class="svg-t sm" x="101" y="128" text-anchor="middle">구현 담당</text>
+
+          <!-- bridge -->
+          <rect class="svg-box-a" x="280" y="30" width="240" height="150" rx="5"/>
+          <text class="svg-t acc" x="400" y="58" text-anchor="middle" font-weight="600">claude-agy-bridge</text>
+          <line class="svg-line acc" x1="298" y1="70" x2="502" y2="70" opacity=".45"/>
+          <text class="svg-t mono" x="298" y="92">context · 파일 인라이닝</text>
+          <text class="svg-t mono" x="298" y="112">playbooks · 검증 절차</text>
+          <text class="svg-t mono" x="298" y="132">jobs · 비동기 레지스트리</text>
+          <text class="svg-t mono" x="298" y="152">runner · 실패 승격</text>
+          <text class="svg-t mono" x="298" y="172">sessions · 대화 재개</text>
+
+          <!-- agy -->
+          <rect class="svg-box" x="614" y="46" width="170" height="118" rx="5"/>
+          <text class="svg-t" x="699" y="88" text-anchor="middle" font-weight="600">agy</text>
+          <text class="svg-t sm" x="699" y="110" text-anchor="middle">Gemini 3.1 Pro</text>
+          <text class="svg-t sm" x="699" y="128" text-anchor="middle">검증 담당</text>
+
+          <!-- arrows: left pair -->
+          <line class="svg-line" x1="188" y1="82" x2="276" y2="82" marker-end="url(#ah)"/>
+          <text class="svg-t sm" x="232" y="72" text-anchor="middle">stdio</text>
+          <text class="svg-t sm" x="232" y="58" text-anchor="middle">JSON-RPC</text>
+          <line class="svg-line" x1="276" y1="128" x2="190" y2="128" marker-end="url(#ah)"/>
+          <text class="svg-t sm" x="232" y="146" text-anchor="middle">판정 · job</text>
+
+          <!-- arrows: right pair -->
+          <line class="svg-line" x1="522" y1="82" x2="610" y2="82" marker-end="url(#ah)"/>
+          <text class="svg-t sm" x="566" y="72" text-anchor="middle">subprocess</text>
+          <text class="svg-t sm" x="566" y="58" text-anchor="middle">agy -p</text>
+          <line class="svg-line" x1="610" y1="128" x2="524" y2="128" marker-end="url(#ah)"/>
+          <text class="svg-t sm" x="566" y="146" text-anchor="middle">JSON 응답</text>
+
+          <!-- filesystem -->
+          <rect class="svg-box" x="16" y="252" width="768" height="52" rx="5"/>
+          <text class="svg-t" x="400" y="275" text-anchor="middle">공유 파일시스템 · 대상 저장소</text>
+          <text class="svg-t sm" x="400" y="293" text-anchor="middle">src/… 시뮬레이션 코드</text>
+
+          <!-- bridge reads FS (live path) -->
+          <line class="svg-line acc" x1="400" y1="182" x2="400" y2="248" marker-end="url(#ah)"/>
+          <text class="svg-t sm acc" x="412" y="218">읽어서 프롬프트에 삽입</text>
+
+          <!-- agy → FS (absent path) -->
+          <line class="svg-line faint" x1="699" y1="166" x2="699" y2="248"/>
+          <line class="svg-line faint" x1="691" y1="199" x2="707" y2="215" stroke-dasharray="0"/>
+          <line class="svg-line faint" x1="707" y1="199" x2="691" y2="215" stroke-dasharray="0"/>
+          <text class="svg-t sm" x="686" y="230" text-anchor="end">기본 경로 아님</text>
+          <text class="svg-t sm" x="686" y="212" text-anchor="end">헤드리스 자동 거부</text>
+        </svg>
+      </div>
+      <figcaption>
+        굵은 화살표가 실제 컨텍스트 경로다. agy에서 파일시스템으로 내려가는 선이 <b>끊겨 있다는 점</b>이
+        이 그림의 요지다 — 그 경로를 살리려면 agy 권한 규칙 등록이 필요하고, 그 절차는 README에 사전 작업으로 명시한다.
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s3b">
+    <div class="sec-head"><span class="sec-num">04</span><h2>브리지는 판단하지 않는다</h2></div>
+    <div class="prose">
+      <p class="lead">
+        MCP 서버 안에는 <strong>LLM이 없다.</strong> 브리지는 전적으로 기계적으로 동작한다 —
+        모델을 호출하지 않고, 요약하지 않고, 무엇이 중요한지 고르지 않는다.
+        지능은 양 끝단에만 있다.
+      </p>
+    </div>
+
+    <div class="table-wrap band">
+      <table>
+        <thead><tr><th>단계</th><th>주체</th><th>성격</th></tr></thead>
+        <tbody>
+          <tr><td>무엇을 언제 물을지 결정 — mode·files·question 작성</td><td class="key">Claude</td><td>판단</td></tr>
+          <tr><td>설정 해석, 파일 읽기, 플레이북 선택, 프롬프트 조립</td><td class="key">브리지</td><td>결정론적 코드</td></tr>
+          <tr><td>서브프로세스 실행, JSON 파싱, job·세션 상태 관리</td><td class="key">브리지</td><td>결정론적 코드</td></tr>
+          <tr><td>과학적 판단</td><td class="key">agy · Gemini</td><td>판단</td></tr>
+          <tr><td>판정을 받아 코드에 반영</td><td class="key">Claude</td><td>판단</td></tr>
+        </tbody>
+      </table>
+      <caption>브리지 안의 모든 "선택"은 테이블 조회이거나 설정값이다. <code>mode → 플레이북</code> 매핑은 정적 사전이고, 어떤 파일이 중요한지 고르는 일은 이미 코드베이스를 들고 있는 Claude의 몫이다.</caption>
+    </div>
+
+    <div class="prose">
+      <p>의도적인 선택이며, 이유는 셋이다.</p>
+      <ul>
+        <li><strong>테스트 가능해진다.</strong> 함정 A에 대한 회귀 테스트가 성립하는 것은 브리지가 코드이기 때문이다.
+            중간에 모델이 있으면 그 경계는 결정론적으로 검증할 수 없다.</li>
+        <li><strong>세 번째 의견이 끼어들지 않는다.</strong> 중간 모델이 요약·선별하면 검증자에게 닿는 내용이 왜곡되고,
+            하필 문제가 있는 줄이 요약 과정에서 사라질 수 있다.</li>
+        <li><strong>비용이 0에 수렴한다.</strong> 브리지는 토큰을 쓰지 않고 수 밀리초를 쓴다.</li>
+      </ul>
+      <p style="margin-bottom:0">브리지는 번역기이자 배관이다. 판단은 하지 않는다.</p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s3c">
+    <div class="sec-head"><span class="sec-num">05</span><h2>컨텍스트는 실제로 얼마나 들어가는가</h2></div>
+    <div class="prose">
+      <p>
+        "파일을 읽어 프롬프트에 넣는다"는 방식에는 천장이 있다. 추측하지 않고 재 봤다.
+        그리고 그 천장이 생각보다 낮은 곳에 있었다.
+      </p>
+    </div>
+
+    <div class="note trap band">
+      <p class="note-title"><span class="chip warn">함정 D</span> argv 단일 인자 128 KiB 하드 리밋</p>
+      <p>
+        <code>agy -p</code>는 <strong>stdin을 읽지 않는다.</strong> 프롬프트를 argv 값으로만 받으므로
+        Linux의 <code>MAX_ARG_STRLEN</code>에 그대로 걸린다. 경계를 이분 탐색으로 확인했다.
+      </p>
+      <div class="table-wrap" style="margin:.75rem 0 0">
+        <table>
+          <thead><tr><th>프롬프트 크기</th><th>결과</th></tr></thead>
+          <tbody>
+            <tr><td class="num">131,000 B</td><td>OK</td></tr>
+            <tr><td class="num">131,072 B</td><td><b>E2BIG — Argument list too long</b></td></tr>
+            <tr><td class="num">1,287,507 B</td><td>E2BIG — 프로세스가 뜨지도 못함</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin:.9rem 0 0">
+        <code>getconf ARG_MAX</code>가 2 MB인 것과는 무관하다. 그건 인자 <em>전체</em> 합이고,
+        <strong>단일 인자</strong>는 128 KiB로 따로 제한된다. 흔히 혼동되는 지점이다.
+      </p>
+    </div>
+
+    <div class="note band">
+      <p class="note-title"><span class="chip">실측</span> 로컬 HTTP fetch는 권한 없이 통과한다</p>
+      <p>
+        파일 읽기 도구는 자동 거부되는데(함정 A), <strong>루프백 URL fetch는 헤드리스에서 그대로 동작한다.</strong>
+        이 비대칭이 대용량 컨텍스트 문제를 푸는 열쇠다.
+      </p>
+      <div class="table-wrap" style="margin:.75rem 0 0">
+        <table>
+          <thead><tr><th>서빙 크기</th><th>표식 배치</th><th>회수</th></tr></thead>
+          <tbody>
+            <tr><td class="num">60 KB</td><td>85% 깊이 1개</td><td>성공</td></tr>
+            <tr><td class="num">600 KB</td><td>10 · 50 · 95% 깊이 3개</td><td><b>3 / 3</b></td></tr>
+            <tr><td class="num">400 KB</td><td>개수 미고지 6개</td><td><b>6 / 6</b></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="note band">
+      <p class="note-title">
+        <span class="chip">정정</span> "검색만 한다"는 첫 판단은 틀렸다
+      </p>
+      <p>
+        위 결과에서 입력 토큰이 낮다는 이유로 <em>전문이 읽히지 않는다</em>고 판단했으나, 오판이었다.
+        공통 부분문자열이 전혀 없는 래퍼로 감싼 인공 단어 8개를 균등 분포시켜
+        <strong>리터럴 검색을 불가능하게</strong> 만든 뒤, 프로덕션 모델로 다시 측정했다.
+      </p>
+      <div class="table-wrap" style="margin:.75rem 0 0">
+        <table>
+          <thead><tr><th class="num">파일 크기</th><th>회수</th><th class="num">소요</th><th class="num">input</th><th class="num">cache_read</th></tr></thead>
+          <tbody>
+            <tr><td class="num">600 KB</td><td><b>8 / 8</b> — 행 번호까지 정확</td><td class="num">45.9 s</td><td class="num">41,356</td><td class="num">93,543</td></tr>
+            <tr><td class="num">2 MB</td><td><b>8 / 8</b></td><td class="num">100.0 s</td><td class="num">75,492</td><td class="num">448,253</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin:.9rem 0 0">
+        낮은 <code>input_tokens</code>는 안 읽혔다는 뜻이 아니라, agy가 <strong>행 번호가 붙은 탐색 가능한 뷰</strong>로
+        파일을 여러 번 나눠 읽고 그 중간 상태가 캐시로 계상되기 때문이다
+        (<code>cache_read</code>가 크기에 비례해 증가한다).
+        <strong>전략 C에 커버리지 손실은 없다. 비용은 정확도가 아니라 지연으로 나타난다.</strong>
+      </p>
+    </div>
+
+    <figure class="band">
+      <div class="fig-frame">
+        <svg viewBox="0 0 760 240" role="img"
+             aria-label="전략 A는 파일을 프롬프트에 인라이닝해 128KiB 한계 안에서 전문을 agy 컨텍스트에 넣고, 전략 C는 로컬 HTTP로 서빙해 URL만 전달하므로 크기 제한은 없지만 agy가 필요한 일부만 가져간다.">
+          <defs>
+            <marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- lane A -->
+          <text class="svg-t sm acc" x="16" y="28">전략 A · 정밀 검토용</text>
+          <rect class="svg-box" x="16" y="38" width="150" height="58" rx="5"/>
+          <text class="svg-t" x="91" y="72" text-anchor="middle">대상 파일</text>
+
+          <rect class="svg-box" x="236" y="38" width="190" height="58" rx="5"/>
+          <text class="svg-t" x="331" y="64" text-anchor="middle">프롬프트 argv</text>
+          <text class="svg-t sm" x="331" y="83" text-anchor="middle">≤ 128 KiB · 하드 리밋</text>
+
+          <rect class="svg-box-a" x="496" y="38" width="248" height="58" rx="5"/>
+          <text class="svg-t acc" x="620" y="64" text-anchor="middle" font-weight="600">전문이 컨텍스트에 진입</text>
+          <text class="svg-t sm" x="620" y="83" text-anchor="middle">118 KB → 117,765 토큰</text>
+
+          <line class="svg-line" x1="168" y1="67" x2="232" y2="67" marker-end="url(#ah4)"/>
+          <text class="svg-t sm" x="200" y="57" text-anchor="middle">인라이닝</text>
+          <line class="svg-line" x1="428" y1="67" x2="492" y2="67" marker-end="url(#ah4)"/>
+          <text class="svg-t sm" x="460" y="57" text-anchor="middle">전달</text>
+
+          <!-- lane C -->
+          <text class="svg-t sm" x="16" y="140">전략 C · 대용량 참조용</text>
+          <rect class="svg-box" x="16" y="150" width="150" height="58" rx="5"/>
+          <text class="svg-t" x="91" y="184" text-anchor="middle">대상 파일</text>
+
+          <rect class="svg-box" x="236" y="150" width="190" height="58" rx="5"/>
+          <text class="svg-t" x="331" y="176" text-anchor="middle">URL만 프롬프트에</text>
+          <text class="svg-t sm" x="331" y="195" text-anchor="middle">크기 제한 사실상 없음</text>
+
+          <rect class="svg-box-a" x="496" y="150" width="248" height="58" rx="5"/>
+          <text class="svg-t acc" x="620" y="176" text-anchor="middle" font-weight="600">필요한 만큼 반복 열람</text>
+          <text class="svg-t sm" x="620" y="195" text-anchor="middle">2 MB → 8/8 · 100 초</text>
+
+          <line class="svg-line" x1="168" y1="179" x2="232" y2="179" marker-end="url(#ah4)"/>
+          <text class="svg-t sm" x="200" y="169" text-anchor="middle">루프백 서빙</text>
+          <line class="svg-line" x1="428" y1="179" x2="492" y2="179" marker-end="url(#ah4)"/>
+          <text class="svg-t sm" x="460" y="169" text-anchor="middle">agy가 fetch</text>
+        </svg>
+      </div>
+      <figcaption>
+        두 경로 모두 커버리지를 보장한다. 차이는 <b>지연과 추적 가능성</b>뿐이다 —
+        A는 15초에 끝나고 어떤 바이트가 검토됐는지 확정할 수 있으며, C는 상한이 없는 대신 크기에 비례해 느려지고
+        어디까지 읽혔는지 브리지가 알 수 없다. 그래서 전환은 크기 임계값 하나로 자동 처리한다.
+      </figcaption>
+    </figure>
+
+    <div class="table-wrap band">
+      <table>
+        <thead><tr><th></th><th>전략 A · 인라이닝</th><th>전략 C · 로컬 HTTP</th></tr></thead>
+        <tbody>
+          <tr><td>크기 한계</td><td>100 KB</td><td><b>없음</b> · 2 MB 실측</td></tr>
+          <tr><td>커버리지</td><td>보장</td><td><b>보장</b> · 8/8 실측</td></tr>
+          <tr><td>지연</td><td><b>~15 초</b></td><td>크기 비례 · 600 KB 46 s, 2 MB 100 s</td></tr>
+          <tr><td>읽힌 범위 추적</td><td>가능</td><td>불가</td></tr>
+          <tr><td>권한 부여</td><td>불필요</td><td>불필요</td></tr>
+        </tbody>
+      </table>
+      <caption>전환은 <code>context.strategy = "auto"</code> 하나로 처리한다 — 100 KB 이하면 A, 초과하면 C로 자동 전환하고 전환 사실을 도구 결과에 명시한다. 소비 세션은 이 결정을 알 필요가 없다.</caption>
+    </div>
+
+    <div class="note band">
+      <p class="note-title">이 정정이 설계를 하나 지웠다 — 전략 B 폐기</p>
+      <p style="margin-bottom:0">
+        원래 세 번째 경로로 <strong>워크스페이스 위임</strong>(<code>--add-dir</code>로 저장소를 주고 agy가 스스로 탐색)을
+        남겨 뒀었다. C가 같은 목적을 <strong>권한 설정 없이</strong> 달성하는 것이 확인된 이상 유지할 이유가 없다.
+        B를 지우면 <code>permissions.allow</code> 문법 확인, README 사전 작업 절, 설정 노브,
+        그리고 이 세션에서 끝내 검증하지 못한 경로가 <em>전부 함께</em> 사라진다.
+        얻는 것 없이 표면적만 넓히던 부분이었다.
+      </p>
+    </div>
+
+    <div class="note danger band">
+      <p class="note-title">전략 C는 소스를 로컬 네트워크에 여는 일이다</p>
+      <p style="margin-bottom:0">
+        편리한 만큼 <strong>같은 머신의 모든 프로세스에게 열린 창구</strong>이기도 하다. 그래서 강제 요건을 둔다 —
+        <code>127.0.0.1</code> 바인딩 고정(설정으로도 변경 불가), 임의 고포트, 경로에 1회용 랜덤 토큰,
+        디렉터리 리스팅 금지·화이트리스트만 노출, <code>deny_globs</code>를 서빙 경로에도 동일 적용,
+        GET만 허용, <strong>서버 수명 = job 수명</strong>이며 예외·타임아웃 경로에서도 종료를 보장한다.
+        유휴 상태로 남은 서버가 가장 흔한 사고 원인이라 <code>agy-bridge doctor</code>가 잔존 여부를 점검한다.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">06</span><h2>도구 표면과 실행 모델</h2></div>
+    <div class="prose">
+      <p>
+        도구는 <strong>다섯 개로 제한</strong>한다. 도구가 많으면 소비 세션이 선택에 토큰을 쓰고,
+        실제로 필요한 동작은 <em>묻는다 · 받는다 · 이어 묻는다</em> 셋뿐이다.
+      </p>
+    </div>
+
+    <div class="table-wrap band">
+      <table>
+        <thead><tr><th>도구</th><th>역할</th></tr></thead>
+        <tbody>
+          <tr><td class="key">agy_consult</td><td>자문·검증 요청. 동기 대기하다 한계를 넘으면 job 핸들 반환</td></tr>
+          <tr><td class="key">agy_result</td><td>job 결과 조회</td></tr>
+          <tr><td class="key">agy_followup</td><td>기존 대화를 이어 재질문 (캐시 히트로 저렴)</td></tr>
+          <tr><td class="key">agy_sessions</td><td>활성 세션·작업 목록 및 종료</td></tr>
+          <tr><td class="key">agy_cancel</td><td>실행 중 job 중단</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="prose">왜 동기 호출만으로는 안 되는가</h3>
+    <div class="prose">
+      <p>
+        MCP 도구 호출은 Claude를 <strong>블로킹</strong>한다. 그런데 <code>gemini-3.1-pro-high</code>로 실제
+        코드 리뷰를 시키면 수 분이 걸리고, <code>--print-timeout</code> 기본값도 5분이다.
+        그래서 <code>agy_consult</code>는 프로세스를 분리 실행하고 <code>wait_seconds</code>까지만 기다린 뒤
+        job 핸들을 돌려준다. 도구는 하나인데 반환 형태가 둘이다.
+      </p>
+    </div>
+
+    <figure class="band">
+      <div class="fig-frame">
+        <svg viewBox="0 0 800 250" role="img"
+             aria-label="agy_consult 호출 후 wait_seconds까지는 Claude가 대기하고, 초과하면 job 핸들을 받아 다른 작업을 진행하다가 agy_result로 결과를 회수한다.">
+          <defs>
+            <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- lane labels -->
+          <text class="svg-t sm" x="16" y="70">Claude</text>
+          <text class="svg-t sm" x="16" y="150">agy job</text>
+
+          <!-- wait boundary -->
+          <line class="svg-line faint" x1="360" y1="34" x2="360" y2="196"/>
+          <text class="svg-t sm acc" x="360" y="26" text-anchor="middle">wait_seconds · 기본 45s</text>
+
+          <!-- Claude lane -->
+          <rect class="svg-box-a" x="96" y="52" width="264" height="30" rx="4"/>
+          <text class="svg-t acc" x="228" y="72" text-anchor="middle" font-size="12">동기 대기</text>
+          <rect class="svg-box" x="372" y="52" width="238" height="30" rx="4"
+                stroke-dasharray="5 4"/>
+          <text class="svg-t sm" x="491" y="72" text-anchor="middle">다른 작업 진행 (테스트 작성 등)</text>
+          <rect class="svg-box-a" x="622" y="52" width="150" height="30" rx="4"/>
+          <text class="svg-t acc" x="697" y="72" text-anchor="middle" font-size="12">agy_result</text>
+
+          <!-- job lane -->
+          <rect class="svg-box" x="96" y="132" width="566" height="30" rx="4"/>
+          <text class="svg-t sm" x="379" y="152" text-anchor="middle">agy -p 실행 중 · 분리 프로세스</text>
+          <circle cx="662" cy="147" r="4" fill="currentColor" class="svg-t"/>
+
+          <!-- call arrow down -->
+          <line class="svg-line acc" x1="96" y1="86" x2="96" y2="128" marker-end="url(#ah2)"/>
+          <text class="svg-t sm acc" x="104" y="112">spawn</text>
+          <text class="svg-t sm" x="96" y="44" text-anchor="middle">agy_consult</text>
+
+          <!-- running handle -->
+          <line class="svg-line" x1="366" y1="112" x2="366" y2="90" marker-end="url(#ah2)"/>
+          <text class="svg-t mono" x="374" y="112">status: "running", job_id</text>
+
+          <!-- completion arrow up -->
+          <line class="svg-line acc" x1="668" y1="128" x2="668" y2="90" marker-end="url(#ah2)"/>
+          <text class="svg-t mono acc" x="676" y="122">completed</text>
+
+          <!-- time axis -->
+          <line class="svg-line" x1="96" y1="212" x2="772" y2="212" marker-end="url(#ah2)" opacity=".5"/>
+          <text class="svg-t sm" x="96" y="230">t0</text>
+          <text class="svg-t sm" x="772" y="230" text-anchor="end">시간</text>
+        </svg>
+      </div>
+      <figcaption>
+        점선 구간이 이 설계가 벌어들이는 것이다 — 검증이 도는 동안 Claude는 멈추지 않는다.
+        job 레코드는 프로젝트별 캐시 디렉터리에 영속화되므로 MCP 서버가 재시작되어도 결과를 잃지 않는다.
+      </figcaption>
+    </figure>
+
+    <h3 class="prose">판정은 산문이 아니라 스키마다</h3>
+    <div class="prose">
+      <p>
+        <code>mode: "verify"</code>는 <code>--json-schema</code>로 응답 구조를 강제한다.
+        Claude가 곧바로 행동에 옮길 수 있어야 하기 때문이다.
+      </p>
+    </div>
+    <pre class="band"><b>verdict</b>     correct | minor_issues | major_issues | incorrect | <em>insufficient_context</em>
+<b>confidence</b>  low | medium | high
+<b>issues[]</b>    severity   blocker | major | minor | nit
+             location   "src/thermo/from_qc.py:88"   <i># 파일:행 형식 요구</i>
+             problem    무엇이 틀렸는가
+             evidence   물리 법칙 · 수식 · 표준 관행 근거
+             suggestion 어떻게 고치는가
+<b><em>assumptions_made[]</em></b>  검토자가 스스로 채운 가정</pre>
+    <div class="note band">
+      <p class="note-title">강조 표시된 두 필드가 이 스키마의 핵심이다</p>
+      <p style="margin-bottom:0">
+        검증자가 <strong>맥락 부족을 환각으로 메우는 것</strong>이 이 구조에서 가장 흔한 실패다.
+        <code>insufficient_context</code>와 <code>assumptions_made</code>는 "모른다"고 말할 출구를
+        스키마에 명시적으로 뚫어 둔 것이다. 출구가 없으면 모델은 지어낸다.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s5">
+    <div class="sec-head"><span class="sec-num">07</span><h2>변화 빈도로 지식을 나눈다</h2></div>
+    <div class="prose">
+      <p>
+        함정 B 때문에 스킬 파일 배치는 쓸 수 없다. 그래서 검증 절차를 브리지가 프롬프트에 직접 주입한다.
+        그러면 남는 질문은 하나다 — <strong>무엇을 브리지에 담고 무엇을 담지 않는가?</strong>
+      </p>
+      <p>
+        초기 설계에서는 <code>quantum-chemistry</code> 프로파일에 패키지별 점검 항목을 담으려 했다.
+        폐기했다. 그것은 <strong>적용 프로젝트마다 달라지므로 브리지에 구우면 이식성이 깨지고</strong>,
+        동시에 <strong>검토자 모델이 이미 아는 지식</strong>이라 인코딩할 가치도 없다.
+        플레이북이 적을 것은 <em>"무엇을 확인하라"</em>이지 <em>"패키지 X에서 그걸 뭐라 부르는가"</em>가 아니다.
+      </p>
+    </div>
+
+    <figure class="band">
+      <div class="fig-frame">
+        <svg viewBox="0 0 760 260" role="img"
+             aria-label="프롬프트는 세 층으로 조립된다. 릴리스마다 바뀌는 내장 플레이북, 커밋마다 바뀌는 프로젝트 오버레이, 호출마다 바뀌는 컨텍스트가 하나의 프롬프트로 합쳐진다.">
+          <defs>
+            <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- layer 1 -->
+          <rect class="svg-box" x="16" y="24" width="380" height="60" rx="5"/>
+          <text class="svg-t" x="34" y="50" font-weight="600">내장 플레이북 · 도메인 불변식</text>
+          <text class="svg-t sm" x="34" y="70">단위 · 근사 유효성 · 수지 · 오차 전파 · 수치</text>
+          <text class="svg-t sm acc" x="378" y="50" text-anchor="end">릴리스 단위</text>
+
+          <!-- layer 2 -->
+          <rect class="svg-box" x="16" y="100" width="380" height="60" rx="5"/>
+          <text class="svg-t" x="34" y="126" font-weight="600">프로젝트 오버레이</text>
+          <text class="svg-t sm" x="34" y="146">&lt;대상 저장소&gt;/.agy-bridge/playbooks/*.md</text>
+          <text class="svg-t sm acc" x="378" y="126" text-anchor="end">커밋 단위</text>
+
+          <!-- layer 3 -->
+          <rect class="svg-box" x="16" y="176" width="380" height="60" rx="5"/>
+          <text class="svg-t" x="34" y="202" font-weight="600">호출별 컨텍스트</text>
+          <text class="svg-t sm" x="34" y="222">이론 수준 · 온도 · 압력 · 대상 파일</text>
+          <text class="svg-t sm acc" x="378" y="202" text-anchor="end">호출 단위</text>
+
+          <!-- merge arrows -->
+          <line class="svg-line" x1="400" y1="54"  x2="470" y2="115" marker-end="url(#ah3)"/>
+          <line class="svg-line" x1="400" y1="130" x2="470" y2="130" marker-end="url(#ah3)"/>
+          <line class="svg-line" x1="400" y1="206" x2="470" y2="145" marker-end="url(#ah3)"/>
+
+          <!-- prompt box -->
+          <rect class="svg-box-a" x="484" y="70" width="260" height="120" rx="5"/>
+          <text class="svg-t acc" x="614" y="112" text-anchor="middle" font-weight="600">조립된 프롬프트</text>
+          <text class="svg-t sm" x="614" y="134" text-anchor="middle">agy -p 로 전달</text>
+          <text class="svg-t sm" x="614" y="152" text-anchor="middle">agy 쪽 설치물 없음</text>
+        </svg>
+      </div>
+      <figcaption>
+        세 층이 변화 빈도에 따라 갈려 있다는 것이 요점이다. 이 분리가 없으면
+        프로젝트 고유 지식이 브리지 코드에 스며들어 두 번째 프로젝트에 이식할 수 없게 된다.
+      </figcaption>
+    </figure>
+
+    <div class="table-wrap band">
+      <table>
+        <thead><tr><th>내장 플레이북</th><th>검사 항목</th></tr></thead>
+        <tbody>
+          <tr><td class="key">units-and-scales</td><td>단위 정합성, 기준 상태 일관성, 분자당↔몰당, 무차원화</td></tr>
+          <tr><td class="key">assumption-validity</td><td>적용된 근사가 그 조건에서 유효한가 — 이상성, 조화 근사, 정상상태, 선형화</td></tr>
+          <tr><td class="key">conservation-and-balance</td><td>물질·에너지·전하 수지 폐합, 보존량 드리프트</td></tr>
+          <tr><td class="key">uncertainty-propagation</td><td>상류 오차가 하류 예측으로 증폭되는 경로, 감도 분석 필요성</td></tr>
+          <tr><td class="key">numerics</td><td>이산화, 수렴 기준, 강성, 조건수, 수렴성 검증 계획</td></tr>
+          <tr><td class="key">derivation</td><td>차원 해석, 극한·점근 거동, 경계·초기 조건 정합, 부호 규약</td></tr>
+          <tr><td class="key">data-provenance</td><td>계산값·문헌값·추정값의 구분, 하드코딩된 상수의 근거</td></tr>
+        </tbody>
+      </table>
+      <caption>어떤 계산과학 프로젝트에도 적용되는 관심사 단위 구성. 스택 이름은 한 줄도 등장하지 않는다.</caption>
+    </div>
+
+    <div class="note danger band">
+      <p class="note-title">
+        <span class="chip warn">중점</span> 코드 리뷰로는 절대 잡히지 않는 실패
+      </p>
+      <p style="margin-bottom:0">
+        상류의 작은 오차가 하류에서 지수적으로 증폭되는 구조가 흔하다.
+        298 K에서 ΔG가 <b>1 kcal·mol⁻¹</b> 어긋나면 평형상수는 약 <b>5.4배</b> 틀어진다
+        (exp(4.184 ÷ (8.314 × 298 × 10⁻³)) ≈ 5.4). 양자화학 계산의 통상 오차가 수 kcal·mol⁻¹임을
+        감안하면 <strong>"계산은 맞는데 예측은 무의미한"</strong> 상태에 쉽게 도달한다.
+        그래서 <code>uncertainty-propagation</code>은 <b>오차 막대 없이 하류로 넘어가는 물리량</b>을
+        지적하도록 명시한다. 이건 문법도 타입도 테스트도 잡아주지 않는다.
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s6">
+    <div class="sec-head"><span class="sec-num">08</span><h2>다른 저장소로 옮겨 심기</h2></div>
+    <div class="prose">
+      <p>
+        브리지는 전역 실행파일로 설치되고, 대상 저장소는 <strong>이름만 참조</strong>한다.
+        경로가 등장하지 않는다는 점이 요점이다.
+      </p>
+    </div>
+
+    <pre class="band"><i># 1. 설치 — 한 번</i>
+uv tool install --from /path/to/claude-agy-bridge agy-bridge
+
+<i># 2. 대상 저장소에 부트스트랩</i>
+agy-bridge init --target /path/to/target-repo
+  <i>→ .mcp.json 등록 · .agy-bridge.toml 생성 · 오버레이 템플릿 · 스모크 호출 1회 검증</i>
+
+<i># 3. 대상 저장소의 .mcp.json — 경로 하드코딩 없음</i>
+{ "mcpServers": { "agy": { "command": <b>"agy-bridge"</b>, "args": ["serve"] } } }</pre>
+
+    <div class="grid three band">
+      <dl class="cell">
+        <dt>프로젝트 루트</dt>
+        <dd>기동 CWD에서 <code>.git</code>까지 거슬러 판정. 환경변수로 오버라이드 가능</dd>
+      </dl>
+      <dl class="cell">
+        <dt>상태 격리</dt>
+        <dd><code>~/.cache/…/&lt;프로젝트 해시&gt;/</code> — 여러 저장소에서 동시에 써도 job·세션이 섞이지 않는다</dd>
+      </dl>
+      <dl class="cell">
+        <dt>설정 우선순위</dt>
+        <dd>도구 인자 → <code>.agy-bridge.toml</code> → 환경변수 → 내장 기본값</dd>
+      </dl>
+    </div>
+
+    <h3 class="prose">이 설계 대화를 보지 못한 세션에게 넘기기</h3>
+    <div class="prose">
+      <p>
+        지식은 사람의 설명이 아니라 <strong>산출물 자체에</strong> 실려야 한다. 세 가지 매개체를 쓴다.
+      </p>
+      <ul>
+        <li><strong>MCP 도구 설명문</strong> — 소비 세션이 반드시 읽는 유일한 텍스트다.
+            비용 경고(호출당 ~10초·17k 토큰), <em>"판정은 자문이지 사실이 아니다"</em>,
+            <code>running</code> 반환 시 기다리지 말 것을 여기에 적는다.</li>
+        <li><strong>README의 사전 작업 절</strong> — <code>agy</code> OAuth, <code>uv</code>, 설치가 전부다.
+            <strong>agy 쪽에 설정할 것이 하나도 없다</strong> — 전략 B를 폐기하면서 권한 등록 절차가 통째로 사라졌다.
+            설명해야 할 사전 조건이 적을수록 다른 세션이 실패할 여지도 줄어든다.</li>
+        <li><strong><code>agy-bridge doctor</code></strong> — "만든 사람에게 물어보기"를 대체하는 자가 진단.
+            실패 시 <em>조치 가능한 문장</em>으로 출력한다.</li>
+      </ul>
+      <p style="margin-bottom:0">
+        인수 조건은 하나로 못 박았다 —
+        <strong>새 세션이 README만 읽고 사람 개입 없이 검증 왕복 1회를 성공시킨다.</strong>
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s7">
+    <div class="sec-head"><span class="sec-num">09</span><h2>로드맵</h2></div>
+    <div class="prose">
+      <p>
+        모든 단계가 대상 저장소와 독립적이다. 도메인 고유 지식은 오버레이로 나중에 주입되므로
+        대상 프로젝트 정보를 기다릴 필요 없이 0에서 6까지 순서대로 진행한다.
+      </p>
+    </div>
+
+    <div class="phases band">
+      <div class="phase">
+        <span class="phase-n">PHASE 0 · 0.5d</span>
+        <span class="phase-t">환경 정비</span>
+        <span class="phase-d">mise에서 node 제거, pyproject 골격</span>
+        <span class="phase-g"><code>uv run agy-bridge --help</code></span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">PHASE 1 · 1d</span>
+        <span class="phase-t">최소 브리지</span>
+        <span class="phase-d">동기 <code>agy_consult</code> + 인라이닝 + 실패 승격</span>
+        <span class="phase-g">실제 코드 리뷰 1건 왕복</span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">PHASE 2 · 1d</span>
+        <span class="phase-t">비동기 · 세션</span>
+        <span class="phase-d">job 레지스트리, 영속화, followup</span>
+        <span class="phase-g">5분 리뷰를 non-blocking 회수</span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">PHASE 3 · 0.5d</span>
+        <span class="phase-t">구조화 판정</span>
+        <span class="phase-d">json-schema 연동, verify 모드</span>
+        <span class="phase-g">결함 샘플에서 major_issues 획득</span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">PHASE 4 · 1.5d</span>
+        <span class="phase-t">과학 능력 팩</span>
+        <span class="phase-d">플레이북 7종 + 오버레이 발견 기구</span>
+        <span class="phase-g">플레이북 유무 간 품질 차이 확인</span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">PHASE 5 · 1.5d</span>
+        <span class="phase-t">대용량 컨텍스트 · 운영성</span>
+        <span class="phase-d">전략 C 서빙 + auto 전환 + 안전 요건, 비용 계측, 호출 예산</span>
+        <span class="phase-g">2 MB 자료 왕복 + 서버 잔존 0</span>
+      </div>
+      <div class="phase">
+        <span class="phase-n">PHASE 6 · 1d</span>
+        <span class="phase-t">패키징 · 핸드오프</span>
+        <span class="phase-d">init · doctor · README · 이식성 테스트</span>
+        <span class="phase-g">새 세션이 README만으로 왕복 성공</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────── -->
+  <section id="s8">
+    <div class="sec-head"><span class="sec-num">10</span><h2>실제로는 이렇게 보인다</h2></div>
+    <div class="prose">
+      <p>
+        Phase 4 완료 시점의 왕복 한 번. 대상 세션의 Claude가 열역학량을 공정 모델로 넘기는
+        모듈을 구현한 직후다.
+      </p>
+    </div>
+
+    <pre class="band">→ <b>agy_consult</b>(
+    mode        = "verify",
+    question    = "QC에서 얻은 ΔG를 평형상수로 변환해 전환율을 예측하는 이 경로가 타당한가?",
+    files       = ["src/thermo/from_qc.py:1-140", "src/process/equilibrium.py:20-90"],
+    context     = "기상 반응, 298 K · 1 atm 기준 열보정 적용, 공정 모델은 이상기체 가정",
+    session_id  = "sess-qc-coupling-01")
+
+← { status: <em>"running"</em>, job_id: "j-7", hint: "예상 2~5분" }
+  <i>… Claude는 그동안 테스트 코드 작성을 계속한다</i>
+
+→ <b>agy_result</b>(job_id = "j-7")
+
+← verdict: <em>"major_issues"</em>   confidence: "high"
+
+  <em>[blocker]</em>  src/thermo/from_qc.py:88 — 표준 상태 변환 누락
+     evidence   QC 열보정은 1 atm 기준인데 공정 모델은 농도 기준을 쓴다.
+                Δn ≠ 0인 반응에서 RT·ln(RT/p°) 항이 빠지면 ΔG가 계통적으로 어긋난다
+     suggestion Δn을 반영한 기준 상태 변환을 적용
+
+  <em>[major]</em>    src/process/equilibrium.py:41 — ΔG 불확실성이 전파되지 않음
+     evidence   298 K에서 ΔG 오차 1 kcal/mol은 K를 약 5.4배 바꾼다
+     suggestion ΔG에 ±오차를 부여해 K와 전환율의 구간을 함께 반환
+
+  assumptions_made: ["기상 이상기체 거동 가정", "저진동수 모드 보정 미적용으로 간주"]</pre>
+
+    <div class="prose">
+      <p style="margin-bottom:0">
+        두 번째 지적이 이 도구를 만드는 이유다. 첫 번째는 꼼꼼한 리뷰어라면 잡을 수 있다.
+        두 번째는 <strong>코드가 완벽히 정상 동작하는 상태에서 예측만 조용히 틀리는</strong> 종류의 결함이고,
+        그걸 잡으려면 도메인을 아는 검증자가 붙어 있어야 한다.
+      </p>
+    </div>
+  </section>
+
+  <footer class="band">
+    <p>전체 설계 문서: <code>docs/plan.md</code> · 13개 절 · 실측 근거 포함</p>
+    <p>남은 입력 없음 — Phase 0부터 대상 프로젝트 정보 없이 착수 가능.</p>
+  </footer>
+
+</div>
+
+</body>
+</html>
