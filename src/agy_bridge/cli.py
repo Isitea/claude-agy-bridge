@@ -10,9 +10,72 @@ agy 권한 설정을 만들지 않으며, `--dangerously-skip-permissions`는 �
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from agy_bridge import __version__
+
+SMOKE_MODEL = "gemini-3.6-flash-low"  # 스모크는 인증·왕복 확인용 — 최저 비용 모델
+
+CONFIG_TEMPLATE = """\
+# claude-agy-bridge 설정. 없는 키는 내장 기본값을 쓴다.
+# 우선순위: 도구 호출 인자 > 이 파일 > 환경변수 > 내장 기본값.
+
+# model  = "gemini-3.1-pro-high"   # 검증 독립성을 위해 Claude 계열 모델은 피하라
+# effort = "high"                  # low | medium | high
+
+# [playbooks]
+# enabled     = ["units-and-scales", "assumption-validity", "uncertainty-propagation"]
+#                                  # 생략하면 mode별 기본 매핑을 쓴다
+# overlay_dir = ".agy-bridge/playbooks"
+
+# [limits]
+# max_inline_chars  = 100000       # 인라이닝→서빙 자동 전환 임계값
+# wait_seconds      = 45           # 동기 대기 창. 넘으면 job 핸들 반환
+# print_timeout     = 600          # agy 자체 타임아웃 (초)
+# daily_call_budget = 60           # 초과 시 도구가 사유와 함께 거부
+
+# [context]
+# deny_globs = [".env*", "*_key*", "*token*", "*.pem", "*.chk", "*.wfn"]
+"""
+
+OVERLAY_TEMPLATE = """\
+# 프로젝트 오버레이 작성 지침 (이 파일은 주입되지 않는다)
+
+이 디렉터리의 `_` 접두가 아닌 `*.md` 파일은 자동 발견되어 모든 검증 호출에서
+내장 플레이북 **뒤에** 주입된다. 브리지를 고치지 않고 이 저장소 고유의 검증
+항목을 추가하는 자리다.
+
+무엇을 적는가 — 이 프로젝트에서만 참인 것:
+- 이 저장소의 단위계·기준 상태 규약 (예: "내부 에너지는 전부 kJ/mol")
+- 자체 자료구조의 불변식
+- 팀 내부 검증 기준, 과거 사고에서 얻은 점검 항목
+
+무엇을 적지 않는가:
+- 일반 물리·화학 지식 (검증자 모델이 이미 안다)
+- 패키지 사용법 (마찬가지)
+- 도메인 불변식 (내장 플레이북이 담당)
+
+작성 예 — `units.md`:
+
+    # 이 저장소의 단위 규약
+    확인하라:
+    - 열역학량은 모듈 경계에서 항상 kJ/mol이어야 한다.
+    - 압력 기준 상태는 1 bar다. 1 atm이 보이면 지적하라.
+"""
+
+CLAUDE_MD_SNIPPET = """\
+## 과학 검증 (agy_consult)
+
+이 저장소에는 독립 검증자 MCP 도구 `agy_consult`가 등록되어 있다.
+- 새 수치 기법을 커밋하기 전, 열역학량이 다른 모델로 넘어가는 경계에서
+  `mode="verify"`로 검증받아라.
+- 같은 주제의 후속 질문은 같은 session_id로 `agy_followup`을 써라 (저렴·정확).
+- 반환값은 자문 의견이다 — evidence를 검토한 뒤 반영하라.
+- `{"status": "running"}`이 오면 기다리지 말고 다른 작업을 계속하다가
+  `agy_result`로 회수하라.
+"""
 
 _PHASE_HINT = "아직 구현되지 않았습니다. 로드맵은 docs/plan.md §11 참조."
 
@@ -31,17 +94,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("serve", help="MCP stdio 서버 기동 (Phase 1)")
+    sub.add_parser("serve", help="MCP stdio 서버 기동")
 
     p_init = sub.add_parser(
-        "init", help="대상 저장소에 .mcp.json 등록 + .agy-bridge.toml 생성 (Phase 6)"
+        "init", help="대상 저장소에 .mcp.json 등록 + .agy-bridge.toml 생성"
     )
     p_init.add_argument("--target", required=True, help="대상 저장소 경로")
-    p_init.add_argument("--profile", help="도메인 프로파일 이름 (예: quantum-chemistry)")
+    p_init.add_argument("--profile", help="AGY_BRIDGE_PROFILE 환경변수로 기록할 이름")
+    p_init.add_argument(
+        "--no-smoke", action="store_true", help="스모크 호출(실제 agy 1회) 생략"
+    )
 
-    sub.add_parser("doctor", help="agy 바이너리·인증·유휴 서버 잔존 점검 (Phase 6)")
+    p_doctor = sub.add_parser(
+        "doctor", help="agy 바이너리·인증·상태·예산 자가 진단"
+    )
+    p_doctor.add_argument(
+        "--no-smoke", action="store_true", help="스모크 호출(실제 agy 1회) 생략"
+    )
 
-    sub.add_parser("budget", help="일일 호출 예산 사용량 조회 (Phase 5)")
+    sub.add_parser("budget", help="일일 호출 예산 사용량 조회")
 
     return parser
 
@@ -54,13 +125,18 @@ def main(argv: list[str] | None = None) -> int:
         return serve()
     if args.command == "budget":
         return _budget()
+    if args.command == "init":
+        return _init(args)
+    if args.command == "doctor":
+        return _doctor(args)
     print(f"agy-bridge {args.command}: {_PHASE_HINT}", file=sys.stderr)
     return 2
 
 
-def _budget() -> int:
-    import json
+# ── budget ──────────────────────────────────────────────
 
+
+def _budget() -> int:
     from agy_bridge.budget import Ledger
     from agy_bridge.config import StartupError, load_config
 
@@ -73,6 +149,188 @@ def _budget() -> int:
     report["project_root"] = str(config.project_root)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
+
+
+# ── init ────────────────────────────────────────────────
+
+
+def _init(args) -> int:
+    from agy_bridge.config import StartupError, find_agy_bin, load_config
+
+    target = Path(args.target).expanduser().resolve()
+    if not target.is_dir():
+        print(f"agy-bridge init: 대상이 디렉터리가 아니다: {target}", file=sys.stderr)
+        return 1
+
+    try:
+        agy_bin = find_agy_bin()
+    except StartupError as exc:
+        print(f"agy-bridge init: {exc}", file=sys.stderr)
+        return 1
+    print(f"[1/5] agy 바이너리: {agy_bin}")
+
+    # .mcp.json 병합 — 기존 서버 항목은 보존한다
+    mcp_path = target / ".mcp.json"
+    mcp_data: dict = {}
+    if mcp_path.is_file():
+        try:
+            mcp_data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            print(
+                f"agy-bridge init: {mcp_path} 파싱 실패 — 손대지 않는다: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    entry: dict = {"command": "agy-bridge", "args": ["serve"]}
+    if args.profile:
+        entry["env"] = {"AGY_BRIDGE_PROFILE": args.profile}
+    mcp_data.setdefault("mcpServers", {})["agy"] = entry
+    mcp_path.write_text(
+        json.dumps(mcp_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"[2/5] {mcp_path} 에 mcpServers.agy 등록")
+
+    # 설정 템플릿 — 있으면 덮어쓰지 않는다
+    config_path = target / ".agy-bridge.toml"
+    if config_path.exists():
+        print(f"[3/5] {config_path} 이미 존재 — 유지")
+    else:
+        config_path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+        print(f"[3/5] {config_path} 생성 (전 항목 주석 = 내장 기본값)")
+
+    # 오버레이 자리 (§8.6)
+    overlay_dir = target / ".agy-bridge" / "playbooks"
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+    template_path = overlay_dir / "_TEMPLATE.md"
+    if not template_path.exists():
+        template_path.write_text(OVERLAY_TEMPLATE, encoding="utf-8")
+    print(f"[4/5] {overlay_dir} 오버레이 자리 생성 (_TEMPLATE.md는 주입되지 않음)")
+
+    # 스모크 — 인증과 왕복을 실제로 확인 (§7.3). 판정은 response 비어있지 않음 (§9)
+    if args.no_smoke:
+        print("[5/5] 스모크 생략 (--no-smoke)")
+    else:
+        error = _smoke(load_config(target))
+        if error:
+            print(f"[5/5] 스모크 실패: {error}", file=sys.stderr)
+            return 1
+        print(f"[5/5] 스모크 통과 ({SMOKE_MODEL} 왕복, 응답 비어있지 않음)")
+
+    print("\n제안: 대상 저장소 CLAUDE.md에 아래 스니펫 추가를 검토하라 (자동으로 쓰지 않는다):\n")
+    print(CLAUDE_MD_SNIPPET)
+    return 0
+
+
+def _smoke(config) -> str | None:
+    """실제 agy 왕복 1회. 성공이면 None, 실패면 조치 가능한 메시지."""
+    from agy_bridge.runner import AgyError, run_agy
+
+    try:
+        result = run_agy(
+            "스모크 테스트다. 'OK'라고만 답하라.",
+            config=config,
+            model=SMOKE_MODEL,
+            effort="low",
+        )
+    except AgyError as exc:
+        return (
+            f"{exc}\n조치: `agy models`로 인증 상태를 확인하라. "
+            "OAuth가 만료됐으면 agy를 대화형으로 한 번 실행해 재인증하라."
+        )
+    if not result.response.strip():
+        return "응답이 비어 있다 — §2.3-A 침묵 실패. stderr를 확인하라."
+    return None
+
+
+# ── doctor ──────────────────────────────────────────────
+
+
+def _doctor(args) -> int:
+    """자가 진단 (§9-3). 실패 항목은 조치 가능한 문장으로 출력한다."""
+    from agy_bridge.budget import Ledger
+    from agy_bridge.config import StartupError, find_agy_bin, load_config
+    from agy_bridge.prompts import (
+        BUILTIN_PLAYBOOKS,
+        discover_overlays,
+        load_builtin_playbook,
+    )
+
+    failures = 0
+
+    def check(name: str, ok: bool, detail: str):
+        nonlocal failures
+        print(f"  [{'OK' if ok else 'FAIL'}] {name}: {detail}")
+        if not ok:
+            failures += 1
+
+    print(f"agy-bridge {__version__} doctor\n")
+
+    try:
+        agy_bin = find_agy_bin()
+        check("agy 바이너리", True, agy_bin)
+    except StartupError as exc:
+        check("agy 바이너리", False, str(exc))
+        print(f"\n진단 결과: 실패 {failures}건")
+        return 1
+
+    try:
+        config = load_config()
+        check("프로젝트 루트", True, str(config.project_root))
+    except StartupError as exc:
+        check("설정 로드", False, str(exc))
+        print(f"\n진단 결과: 실패 {failures}건")
+        return 1
+
+    probe = config.state_dir / ".doctor-probe"
+    try:
+        probe.write_text("ok")
+        probe.unlink()
+        check("상태 디렉터리 쓰기", True, str(config.state_dir))
+    except OSError as exc:
+        check("상태 디렉터리 쓰기", False, f"{config.state_dir}: {exc}")
+
+    try:
+        for name in BUILTIN_PLAYBOOKS:
+            load_builtin_playbook(name)
+        overlays = discover_overlays(config.project_root, config.overlay_dir)
+        check(
+            "플레이북",
+            True,
+            f"내장 {len(BUILTIN_PLAYBOOKS)}종 + 오버레이 {len(overlays)}건"
+            + (f" ({', '.join(n for n, _ in overlays)})" if overlays else ""),
+        )
+    except (OSError, ValueError) as exc:
+        check("플레이북", False, str(exc))
+
+    report = Ledger(config).report(config.daily_call_budget)
+    check(
+        "호출 예산",
+        report["remaining"] > 0,
+        f"오늘 {report['calls_started']}회 사용 / 상한 {report['daily_call_budget']}회"
+        + ("" if report["remaining"] > 0 else " — 소진. 자정 초기화 또는 상한 조정"),
+    )
+
+    # 유휴 서버는 브리지 프로세스와 함께 소멸하므로 잔존할 수 없다 (§10.1 —
+    # 회귀 테스트가 보증). 여기서는 회수 안 된 고아 job만 점검한다.
+    from agy_bridge.jobs import JobRegistry
+
+    registry = JobRegistry(config)
+    stale = [r.job_id for r in registry.list_jobs() if r.state == "running"]
+    check(
+        "미회수 job",
+        True,
+        f"running {len(stale)}건"
+        + (f" ({', '.join(stale)}) — agy_result 호출 시 자동 회수됨" if stale else ""),
+    )
+
+    if args.no_smoke:
+        print("  [SKIP] 스모크 (--no-smoke)")
+    else:
+        error = _smoke(config)
+        check("스모크 (인증·왕복)", error is None, error or f"{SMOKE_MODEL} 응답 정상")
+
+    print(f"\n진단 결과: {'전 항목 통과' if failures == 0 else f'실패 {failures}건'}")
+    return 0 if failures == 0 else 1
 
 
 if __name__ == "__main__":

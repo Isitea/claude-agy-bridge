@@ -103,13 +103,15 @@ def playbook_names_for_mode(
 
 
 def discover_overlays(project_root: Path, overlay_dir: str) -> list[tuple[str, str]]:
-    """오버레이 (파일명, 내용) 목록 (§8.6). 파일명 순 정렬로 결정론을 유지한다."""
+    """오버레이 (파일명, 내용) 목록 (§8.6). 파일명 순 정렬로 결정론을 유지한다.
+    `_` 접두 파일(_TEMPLATE.md 등)은 작성 지침용이므로 주입하지 않는다."""
     directory = project_root / overlay_dir
     if not directory.is_dir():
         return []
     return [
         (path.name, path.read_text(encoding="utf-8", errors="replace"))
         for path in sorted(directory.glob("*.md"))
+        if not path.name.startswith("_")
     ]
 
 
