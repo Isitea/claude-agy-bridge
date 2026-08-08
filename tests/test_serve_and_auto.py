@@ -297,3 +297,28 @@ class TestRetry:
         record = _wait_terminal(registry, record.job_id)
         assert record.state == "failed"
         assert record.attempts == 1
+
+    def test_retry_invokes_on_retry_hook(self, tmp_path, bridge_config):
+        """리뷰 #5-2: 재시도 스폰이 훅으로 통지되어 원장에 계산될 수 있어야 한다."""
+        marker = tmp_path / "attempted-hook"
+        script = tmp_path / "flaky-agy-hook"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"if [ ! -f {marker} ]; then\n"
+            f"  touch {marker}\n"
+            "  exit 1\n"
+            "fi\n"
+            f"printf '%s' '{json.dumps(PAYLOAD)}'\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+        retries: list[tuple[str, int]] = []
+        registry = JobRegistry(
+            bridge_config(script),
+            on_retry=lambda r: retries.append((r.job_id, r.attempts)),
+        )
+        record = registry.start("p", mode="review", question="q")
+        record = _wait_terminal(registry, record.job_id)
+        assert record.state == "completed"
+        assert retries == [(record.job_id, 2)]

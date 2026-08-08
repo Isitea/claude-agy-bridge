@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
+import fcntl
 import json
 import threading
 from pathlib import Path
@@ -29,8 +31,22 @@ class Ledger:
         self._path: Path = config.state_dir / "ledger.jsonl"
         self._lock = threading.Lock()
 
+    @contextlib.contextmanager
+    def _exclusive(self):
+        """확인·기록 임계구역 — 스레드 락 + fcntl.flock. 상태 디렉터리를 공유하는
+        브리지 프로세스(같은 저장소의 다중 세션)와도 원자성이 성립해야 상한
+        직전의 동시 호출이 각자 확인만 통과해 예산을 넘는 경합이 닫힌다 (§13)."""
+        lock_path = self._path.with_suffix(".lock")
+        with self._lock, open(lock_path, "w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
     def _append(self, entry: dict) -> None:
-        with self._lock, open(self._path, "a", encoding="utf-8") as handle:
+        # 호출자는 _exclusive() 안에서 부른다.
+        with open(self._path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def _entries(self) -> list[dict]:
@@ -51,10 +67,27 @@ class Ledger:
     # ── 기록 ─────────────────────────────────────────────
 
     def record_start(self, job_id: str, *, mode: str, model: str) -> None:
-        self._append(
-            {"event": "start", "date": _today(), "job_id": job_id,
-             "mode": mode, "model": model}
-        )
+        with self._exclusive():
+            self._append(
+                {"event": "start", "date": _today(), "job_id": job_id,
+                 "mode": mode, "model": model}
+            )
+
+    def record_retry(self, job_id: str, *, mode: str) -> None:
+        """재시도 스폰도 실제 agy 프로세스 기동이다 — start로 계산해야 예산이
+        '시작된 agy 프로세스 수'라는 의미를 지킨다 (리뷰 #5-2)."""
+        with self._exclusive():
+            self._append(
+                {"event": "start", "date": _today(), "job_id": job_id,
+                 "mode": mode, "retry": True}
+            )
+
+    def record_spawn_failed(self, job_id: str) -> None:
+        """선기록된 start가 스폰에 실패했다 — 보정 엔트리로 계수에서 뺀다."""
+        with self._exclusive():
+            self._append(
+                {"event": "spawn_failed", "date": _today(), "job_id": job_id}
+            )
 
     def record_finish(
         self,
@@ -64,28 +97,45 @@ class Ledger:
         usage: dict | None,
         duration_seconds: float | None,
     ) -> None:
-        self._append(
-            {"event": "finish", "date": _today(), "job_id": job_id,
-             "state": state, "usage": usage or {},
-             "duration_seconds": duration_seconds}
-        )
+        with self._exclusive():
+            self._append(
+                {"event": "finish", "date": _today(), "job_id": job_id,
+                 "state": state, "usage": usage or {},
+                 "duration_seconds": duration_seconds}
+            )
 
     # ── 예산 ─────────────────────────────────────────────
 
     def calls_today(self) -> int:
         today = _today()
-        return sum(
-            1 for e in self._entries()
-            if e.get("event") == "start" and e.get("date") == today
-        )
+        entries = [e for e in self._entries() if e.get("date") == today]
+        starts = sum(1 for e in entries if e.get("event") == "start")
+        failed_spawns = sum(1 for e in entries if e.get("event") == "spawn_failed")
+        return max(0, starts - failed_spawns)
 
-    def check_budget(self, limit: int) -> None:
-        used = self.calls_today()
+    def _raise_if_exceeded(self, used: int, limit: int) -> None:
         if used >= limit:
             raise BudgetExceeded(
                 f"일일 호출 예산 초과: 오늘 {used}회 시작 / 상한 {limit}회 "
                 "(.agy-bridge.toml [limits] daily_call_budget). "
                 "자정(로컬)에 초기화된다. 정말 필요하면 상한을 올려라."
+            )
+
+    def check_budget(self, limit: int) -> None:
+        """비원자적 사전 확인 — 값싼 조기 거부용. 스폰 직전에는
+        check_and_record_start가 원자적으로 다시 판정한다."""
+        self._raise_if_exceeded(self.calls_today(), limit)
+
+    def check_and_record_start(
+        self, job_id: str, *, mode: str, model: str, limit: int
+    ) -> None:
+        """확인과 기록을 한 임계구역에서 수행한다 (리뷰 #5-1). 스폰 전에 기록하므로
+        초과 스폰이 원천 차단된다 — 스폰이 실패하면 record_spawn_failed로 보정하라."""
+        with self._exclusive():
+            self._raise_if_exceeded(self.calls_today(), limit)
+            self._append(
+                {"event": "start", "date": _today(), "job_id": job_id,
+                 "mode": mode, "model": model}
             )
 
     # ── 리포트 ───────────────────────────────────────────
@@ -94,18 +144,27 @@ class Ledger:
         today = _today()
         entries = [e for e in self._entries() if e.get("date") == today]
         starts = [e for e in entries if e.get("event") == "start"]
+        retries = [e for e in starts if e.get("retry")]
+        failed_spawns = [e for e in entries if e.get("event") == "spawn_failed"]
         finishes = [e for e in entries if e.get("event") == "finish"]
+        # check_budget과 같은 보정(순계)을 써야 리포트와 거부 판정이 일치한다
+        calls = max(0, len(starts) - len(failed_spawns))
         tokens = sum(
             int((e.get("usage") or {}).get("total_tokens") or 0) for e in finishes
         )
         by_state: dict[str, int] = {}
         for entry in finishes:
             by_state[entry.get("state", "?")] = by_state.get(entry.get("state", "?"), 0) + 1
-        return {
+        payload = {
             "date": today,
-            "calls_started": len(starts),
+            "calls_started": calls,
             "daily_call_budget": limit,
-            "remaining": max(0, limit - len(starts)),
+            "remaining": max(0, limit - calls),
             "total_tokens": tokens,
             "finished_by_state": by_state,
         }
+        if retries:
+            payload["retries"] = len(retries)
+        if failed_spawns:
+            payload["spawn_failed"] = len(failed_spawns)
+        return payload

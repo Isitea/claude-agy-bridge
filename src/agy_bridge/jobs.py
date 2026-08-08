@@ -73,6 +73,7 @@ class JobRegistry:
         self,
         config: Config,
         on_complete=None,  # (record, AgyResult | None) -> None — 종결 훅 (§6, 원장)
+        on_retry=None,     # (record) -> None — 재시도 스폰 훅 (§13, 원장 계측)
     ):
         self._config = config
         self._jobs_dir = config.state_dir / "jobs"
@@ -82,6 +83,7 @@ class JobRegistry:
         self._events: dict[str, threading.Event] = {}
         self._watched: set[str] = set()
         self._on_complete = on_complete
+        self._on_retry = on_retry
         self._servers: dict[str, object] = {}   # job_id → ContextServer (수명 연동 §10.1)
         self._commands: dict[str, list[str]] = {}  # job_id → argv (재시도용, 메모리 전용)
 
@@ -308,6 +310,8 @@ class JobRegistry:
                 event = self._events.setdefault(job_id, threading.Event())
 
         if retry_process is not None:
+            if self._on_retry is not None:
+                self._on_retry(record)
             self._start_watcher(job_id, retry_process)
             return
 

@@ -17,7 +17,7 @@ import anyio
 from mcp.server.mcpserver import MCPServer
 
 from agy_bridge import __version__
-from agy_bridge.budget import Ledger
+from agy_bridge.budget import BudgetExceeded, Ledger
 from agy_bridge.config import Config, StartupError, load_config
 from agy_bridge.context import PreparedContext, prepare_context
 from agy_bridge.jobs import TERMINAL_STATES, JobRecord, JobRegistry, UnknownJob
@@ -137,7 +137,13 @@ def build_server(config: Config) -> MCPServer:
                 usage=result.usage,
             )
 
-    registry = JobRegistry(config, on_complete=_on_complete)
+    registry = JobRegistry(
+        config,
+        on_complete=_on_complete,
+        # 재시도 스폰도 실제 agy 기동이다 — start(retry)로 원장에 계산해야
+        # daily_call_budget이 '시작된 프로세스 수'라는 의미를 지킨다 (리뷰 #5-2)
+        on_retry=lambda record: ledger.record_retry(record.job_id, mode=record.mode),
+    )
 
     # ── 공통 헬퍼 ────────────────────────────────────────
 
@@ -157,6 +163,13 @@ def build_server(config: Config) -> MCPServer:
                 payload["session_id"] = record.session_id
             if record.result.get("structured_output") is not None:
                 payload["verdict"] = record.result["structured_output"]
+            if record.attempts > 1:
+                # 비용 인식·신뢰도 판단 재료 (리뷰 #5-3)
+                payload["attempts"] = record.attempts
+                payload["attempts_note"] = (
+                    "agy 비정상 종료로 재시도되었다 — 토큰 비용이 그만큼 "
+                    "중복 발생했다."
+                )
             _attach_strategy(payload, record)
             return payload
         if record.state == "running":
@@ -223,7 +236,8 @@ def build_server(config: Config) -> MCPServer:
         wait_seconds: float | None,
         structured: bool,
     ) -> dict:
-        # 예산 확인은 스폰 전에 한다 — 프로세스가 뜬 뒤 거부하면 이미 비용이 나갔다
+        # 값싼 사전 확인 — 컨텍스트 준비 전에 조기 거부한다. 동시 호출에 대한
+        # 원자적 판정은 스폰 직전의 check_and_record_start가 한다 (리뷰 #5-1).
         ledger.check_budget(config.daily_call_budget)
 
         prepared: PreparedContext | None = None
@@ -256,30 +270,46 @@ def build_server(config: Config) -> MCPServer:
                 ),
                 structured=structured,
             )
-            record = registry.start(
-                prompt,
-                mode=mode,
-                question=question,
-                session_id=session_id,
-                conversation_id=conversation_id,
-                model=model,
-                effort=effort,
-                json_schema=verdict_schema_json() if structured else None,
-                reviewed=prepared.inline_manifest if prepared else [],
-                served=prepared.served_manifest if prepared else [],
-                strategy=prepared.strategy if prepared else "inline",
-                strategy_reason=prepared.reason if prepared else None,
-                context_server=context_server,
-            )
+            # 스폰 전 선기록 (§13): id를 선점하고, 확인+기록을 원자 구간에서
+            # 수행한다 — 스폰 후 기록하면 동시 호출이 상한을 넘고, 기록 후
+            # 스폰이 실패하면 보정 엔트리로 되돌린다.
+            job_id = registry.claim_job_id()
+            try:
+                ledger.check_and_record_start(
+                    job_id, mode=mode, model=model or config.model,
+                    limit=config.daily_call_budget,
+                )
+            except BudgetExceeded:
+                registry.release_claim(job_id)
+                raise
+            try:
+                record = registry.start(
+                    prompt,
+                    mode=mode,
+                    question=question,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    model=model,
+                    effort=effort,
+                    json_schema=verdict_schema_json() if structured else None,
+                    reviewed=prepared.inline_manifest if prepared else [],
+                    served=prepared.served_manifest if prepared else [],
+                    strategy=prepared.strategy if prepared else "inline",
+                    strategy_reason=prepared.reason if prepared else None,
+                    context_server=context_server,
+                    job_id=job_id,
+                )
+            except Exception:
+                ledger.record_spawn_failed(job_id)
+                registry.release_claim(job_id)
+                raise
         except Exception:
             # registry.start에 도달하지 못한 실패 경로에서도 서버를 남기지 않는다
+            # (registry.start 내부의 close와 겹쳐도 close는 멱등이다)
             if context_server is not None:
                 context_server.close()
             raise
 
-        ledger.record_start(
-            record.job_id, mode=mode, model=model or config.model
-        )
         window = config.wait_seconds if wait_seconds is None else wait_seconds
         record = registry.wait(record.job_id, window)
         return _job_payload(record)
