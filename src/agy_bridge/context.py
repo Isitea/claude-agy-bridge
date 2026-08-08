@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from agy_bridge.runner import ARGV_PROMPT_LIMIT_BYTES
+
 
 class ContextError(ValueError):
     """파일 스펙이 잘못됐거나 인라이닝이 거부된 경우."""
@@ -31,6 +33,19 @@ _SPEC_RE = re.compile(r"^(?P<path>.+?)(?::(?P<start>\d+)(?:-(?P<end>\d+))?)?$")
 # 에이전트가 fetch 대신 셸 검색(권한 거부→침묵)을 시도하는 경향이 있다.
 # 유한한 부분 목록을 주면 fetch 반복 계획이 명확해져 이 탈선이 사라진다.
 SERVE_CHUNK_BYTES = 400_000
+
+# 인라이닝 예산의 바이트 상한 (§2.3-D). 예산을 문자 수로만 세면 한글(UTF-8
+# 3 B/자) 자료가 문자 예산을 통과하고도 argv 한계(바이트)를 넘어, auto 폴백이
+# 발동하지 못한 채 호출 전체가 실패한다. 그래서 문자·바이트 예산을 병행하고
+# 둘 중 먼저 걸리는 쪽을 적용한다 — ASCII 자료의 기존 동작은 변하지 않는다.
+# 헤드룸은 고정 블록(_common + 플레이북 + mode 지시문, 실측 최대 ~4.4 KB)과
+# question/context 몫이다. 사용자 입력은 무한정일 수 있으므로 조립 후의
+# ensure_prompt_within_argv_limit가 최종 방어선으로 남는다.
+ARGV_HEADROOM_BYTES = 8_000
+
+
+def _budget_bytes(max_chars: int) -> int:
+    return min(max_chars * 3, ARGV_PROMPT_LIMIT_BYTES - ARGV_HEADROOM_BYTES)
 
 
 def parse_spec(spec: str) -> tuple[str, int | None, int | None]:
@@ -105,6 +120,7 @@ def _render_spec(
         "lines": f"{start}-{end}",
         "block": block,
         "chars": len(block),
+        "bytes": len(block.encode("utf-8")),
     }
 
 
@@ -119,19 +135,22 @@ def inline_files(
     blocks: list[str] = []
     manifest: list[dict] = []
     total_chars = 0
+    total_bytes = 0
+    budget_bytes = _budget_bytes(max_chars)
 
     for spec in specs:
         rendered = _render_spec(spec, project_root=project_root, deny_globs=deny_globs)
         total_chars += rendered["chars"]
-        if total_chars > max_chars:
+        total_bytes += rendered["bytes"]
+        if total_chars > max_chars or total_bytes > budget_bytes:
             raise ContextTooLarge(
-                f"인라이닝 합계가 상한 {max_chars:,}자를 초과했다 ({spec} 포함 시점). "
-                "행범위를 좁히거나 파일 수를 줄여라."
+                f"인라이닝 합계가 상한(문자 {max_chars:,} / 바이트 {budget_bytes:,})을 "
+                f"초과했다 ({spec} 포함 시점). 행범위를 좁히거나 파일 수를 줄여라."
             )
         blocks.append(rendered["block"])
         manifest.append(
             {"file": rendered["display"], "lines": rendered["lines"],
-             "chars": rendered["chars"]}
+             "chars": rendered["chars"], "bytes": rendered["bytes"]}
         )
 
     return "\n\n".join(blocks), manifest
@@ -198,15 +217,23 @@ def prepare_context(
     to_serve: dict[str, bytes] = {}
     served_manifest: list[dict] = []
     total_chars = 0
+    total_bytes = 0
+    budget_bytes = _budget_bytes(max_chars)
     overflowed = False
 
     for item in rendered:
-        if not overflowed and total_chars + item["chars"] <= max_chars:
+        if (
+            not overflowed
+            and total_chars + item["chars"] <= max_chars
+            and total_bytes + item["bytes"] <= budget_bytes
+        ):
             total_chars += item["chars"]
+            total_bytes += item["bytes"]
             blocks.append(item["block"])
             inline_manifest.append(
                 {"file": item["display"], "lines": item["lines"],
-                 "chars": item["chars"], "delivery": "inline"}
+                 "chars": item["chars"], "bytes": item["bytes"],
+                 "delivery": "inline"}
             )
         else:
             overflowed = True
@@ -214,8 +241,8 @@ def prepare_context(
             names = _chunk_into(to_serve, base_name, item["block"])
             served_manifest.append(
                 {"file": item["display"], "lines": item["lines"],
-                 "chars": item["chars"], "delivery": "served",
-                 "serve_names": names}
+                 "chars": item["chars"], "bytes": item["bytes"],
+                 "delivery": "served", "serve_names": names}
             )
 
     if not to_serve:
@@ -223,14 +250,14 @@ def prepare_context(
     elif inline_manifest:
         strategy = "mixed"
         reason = (
-            f"인라이닝 합계가 상한 {max_chars:,}자를 초과해 "
+            f"인라이닝 예산(문자 {max_chars:,} / 바이트 {budget_bytes:,})을 초과해 "
             f"{len(served_manifest)}개 파일을 루프백 서빙으로 전환 (§4.3 auto)"
         )
     else:
         strategy = "serve"
         reason = (
-            f"첫 파일부터 상한 {max_chars:,}자를 초과해 전체를 루프백 서빙으로 "
-            "전환 (§4.3 auto)"
+            f"첫 파일부터 인라이닝 예산(문자 {max_chars:,} / 바이트 {budget_bytes:,})을 "
+            "초과해 전체를 루프백 서빙으로 전환 (§4.3 auto)"
         )
 
     return PreparedContext(

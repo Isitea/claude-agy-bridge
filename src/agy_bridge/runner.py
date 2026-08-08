@@ -68,7 +68,8 @@ def ensure_prompt_within_argv_limit(prompt: str) -> None:
         raise AgyError(
             f"조립된 프롬프트가 {prompt_bytes:,} B로 argv 단일 인자 한계"
             f"({ARGV_PROMPT_LIMIT_BYTES:,} B)를 넘는다 (§2.3-D). "
-            "인라이닝 상한이 지켜졌다면 발생할 수 없는 상태다 — 버그로 보고하라."
+            "files 예산은 문자·바이트 양쪽으로 관리되므로, 보통 question/context가 "
+            "지나치게 길 때 생긴다 — question/context를 줄이고 자료는 files로 넘겨라."
         )
 
 

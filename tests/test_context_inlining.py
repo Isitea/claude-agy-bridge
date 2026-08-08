@@ -42,7 +42,10 @@ def test_whole_file_inlining_has_line_numbers(tmp_path):
     text, manifest = _inline(["a.py"], tmp_path)
     assert "--- FILE a.py [1-3행 / 총 3행] ---" in text
     assert "1| alpha" in text and "3| gamma" in text
-    assert manifest == [{"file": "a.py", "lines": "1-3", "chars": len(text)}]
+    assert manifest == [
+        {"file": "a.py", "lines": "1-3", "chars": len(text),
+         "bytes": len(text.encode("utf-8"))}
+    ]
 
 
 def test_line_range_slicing_keeps_absolute_numbers(tmp_path):
@@ -91,6 +94,16 @@ def test_multiple_files_accumulate_toward_cap(tmp_path):
     (tmp_path / "f2.py").write_text("b" * 600)
     with pytest.raises(ContextTooLarge):
         _inline(["f1.py", "f2.py"], tmp_path, max_chars=1000)
+
+
+def test_multibyte_bytes_budget_enforced(tmp_path):
+    """리뷰 #1 회귀 (§2.3-D): 한글(UTF-8 3 B/자) 자료는 문자 예산을 통과해도
+    바이트 예산에 걸려야 한다 — 아니면 argv 한계에서 호출 전체가 죽는다."""
+    line = "# 검토 대상: 상태방정식 선택이 임계점 근방에서 밀도 예측에 미치는 영향을 확인한다"
+    (tmp_path / "ko.md").write_text("\n".join([line] * 1200), encoding="utf-8")
+    # 파일: 약 5.8만 자 (문자 예산 10만 이내) / 약 14만 B (바이트 예산 12.2만 초과)
+    with pytest.raises(ContextTooLarge, match="바이트"):
+        _inline(["ko.md"], tmp_path)
 
 
 def test_absolute_path_outside_root_displays_absolute(tmp_path):

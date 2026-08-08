@@ -171,6 +171,36 @@ class TestAutoStrategy:
         with pytest.raises(ContextError, match="deny_globs"):
             self._prepare([".env.prod"], tmp_path, max_chars=1)
 
+    def test_multibyte_overflow_switches_to_serve(self, tmp_path):
+        """리뷰 #1 회귀 (§2.3-D): 한글 자료가 문자 예산(10만 자)을 통과해도
+        바이트 예산이 서빙 전환을 발동해야 한다 — 인라이닝으로 판정되면
+        argv 한계에서 auto 폴백 없이 호출 전체가 실패했었다."""
+        line = "# 검토 대상: 상태방정식 선택이 임계점 근방에서 밀도 예측에 미치는 영향을 확인한다"
+        (tmp_path / "design.md").write_text("\n".join([line] * 1200), encoding="utf-8")
+        prepared = self._prepare(["design.md"], tmp_path)  # max_chars=100_000
+        assert prepared.strategy == "serve"
+        assert "바이트" in prepared.reason
+
+    def test_multibyte_assembled_prompt_stays_within_argv_limit(self, tmp_path):
+        """리뷰 #1의 재현 시나리오 전체: 조립된 프롬프트가 argv 한계를 넘지 않는다."""
+        from agy_bridge.prompts import assemble_prompt, compose_playbooks_block
+        from agy_bridge.runner import ensure_prompt_within_argv_limit
+
+        line = "# 검토 대상: 상태방정식 선택이 임계점 근방에서 밀도 예측에 미치는 영향을 확인한다"
+        (tmp_path / "design.md").write_text("\n".join([line] * 1200), encoding="utf-8")
+        prepared = self._prepare(["design.md"], tmp_path)
+        prompt = assemble_prompt(
+            mode="review",
+            question="상태방정식 선택을 검토해 달라.",
+            context="초임계 CO2, 320 K, 80 bar.",
+            files_block=prepared.files_block,
+            playbooks_block=compose_playbooks_block(
+                "review", project_root=tmp_path,
+                overlay_dir=".agy-bridge/playbooks",
+            ),
+        )
+        ensure_prompt_within_argv_limit(prompt)  # 이전에는 여기서 AgyError
+
 
 PAYLOAD = {
     "conversation_id": "conv-s",
