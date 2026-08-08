@@ -6,10 +6,9 @@ uv = "latest"
 # node는 사용하지 않는다 (§7.1) — MCP stdio 서버에 불필요, 이식 시 런타임 표면 축소.
 
 [env]
-# 사내 프록시(<제품명>)가 github.com을 MITM한다. uv의 번들 webpki 루트에는
-# 이 CA가 없어 CPython 다운로드가 `invalid peer certificate: UnknownIssuer`로 실패한다.
-# 시스템 CA 저장소(/etc/ssl/certs/ca-certificates.crt)를 사용하게 해 정직하게 해결한다.
-# (인증서 검증을 끄는 것이 아니라, 시스템에 설치된 CA를 신뢰 목록에 포함시키는 것)
+# TLS를 가로채는 프록시 환경에서는 uv의 번들 webpki 루트만으로 CPython 다운로드가
+# `invalid peer certificate: UnknownIssuer`로 실패한다. 시스템 CA 저장소를
+# 신뢰 목록에 포함시켜 해결한다 (인증서 검증을 끄는 것이 아니다).
 UV_SYSTEM_CERTS = "1"
 
 [settings]

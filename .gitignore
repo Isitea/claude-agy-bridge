@@ -17,6 +17,9 @@ dist/
 mise.local.toml
 .mise.local.toml
 
+# Claude Code 로컬 산출물 — 세션 로그에 절대 경로·세션 ID·트랜스크립트가 담긴다
+.claude/
+
 # 브리지 런타임 상태 (프로젝트별 캐시에 저장되나 만약을 대비)
 .agy-bridge/state/
 
