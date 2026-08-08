@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -187,3 +188,114 @@ def test_spawn_failure_releases_claim(bridge_config):
         registry.start("p", mode="review", question="q")
     assert registry.list_jobs() == []
     assert registry.claim_job_id() == "j-1"  # 반납된 id가 재사용된다
+
+
+def test_cross_process_cancel_survives_owner_retry(bridge_config):
+    """후속 A: 다른 브리지 프로세스가 취소한 job을 소유 프로세스의 재시도 로직이
+    되살리면 안 된다 — cancelled를 디스크 권위로 존중해야 한다."""
+    # 잠깐 살아 있다가 비정상 종료(재시도 대상)하는 가짜 agy
+    slow_fail = bridge_config()  # config만 필요; 스크립트는 아래에서 만든다
+    import textwrap
+
+    script = slow_fail.state_dir.parent / "slow-fail-agy"
+    script.write_text(
+        textwrap.dedent("""\
+            #!/bin/sh
+            sleep 30
+            echo 'infra error' >&2
+            exit 1
+        """),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    config = bridge_config(script)
+
+    owner = JobRegistry(config)  # 감시 스레드가 있는 소유 프로세스
+    canceller = JobRegistry(config)  # 같은 상태 디렉터리를 보는 다른 프로세스
+
+    record = owner.start("p", mode="review", question="q")
+    assert owner.wait(record.job_id, 0.3).state == "running"
+
+    cancelled = canceller.cancel(record.job_id)  # 다른 프로세스가 취소 → SIGTERM
+    assert cancelled.state == "cancelled"
+
+    # 소유 프로세스의 감시 스레드가 프로세스 사망을 보고 종결을 시도한다 —
+    # 재시도로 되살리지 않고 cancelled를 유지해야 한다.
+    time.sleep(1.5)
+    final = owner.get(record.job_id)
+    assert final.state == "cancelled", final.state
+    assert final.attempts == 1  # 재스폰되지 않았다
+
+
+def test_retry_spawn_failure_marks_failed_not_stuck(bridge_config, fake_agy, monkeypatch):
+    """후속 A: 재시도 스폰이 OSError로 실패해도 감시 스레드가 죽어 job이 영구
+    running으로 고착되면 안 된다 — failed로 종결해야 한다."""
+    registry = JobRegistry(
+        bridge_config(fake_agy(PAYLOAD, returncode=1, stderr="transient"))
+    )
+    real_spawn = registry._spawn
+    n = {"count": 0}
+
+    def flaky_spawn(job_id, cmd):
+        n["count"] += 1
+        if n["count"] >= 2:  # 재시도 스폰에서만 실패
+            raise OSError("Cannot allocate memory")
+        return real_spawn(job_id, cmd)
+
+    monkeypatch.setattr(registry, "_spawn", flaky_spawn)
+    record = registry.start("p", mode="review", question="q")
+    record = _wait_terminal(registry, record.job_id)
+    assert record.state == "failed"
+    assert "재시도 스폰 실패" in record.error
+
+
+def test_concurrent_orphan_recovery_is_single_finalize(bridge_config):
+    """후속 A: 감시 없는 두 레지스트리가 같은 고아 job을 동시에 회수해도
+    tmp 충돌로 크래시하거나 종결 훅이 이중 발화하면 안 된다."""
+    import subprocess as sp
+    import threading
+    from dataclasses import asdict
+
+    from agy_bridge.jobs import JobRecord
+
+    config = bridge_config("/bin/true")
+    jobs_dir = config.state_dir / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    dead = sp.Popen(["/bin/true"])
+    dead.wait()  # 회수되어 죽은 pid — _pid_alive False
+
+    rec = JobRecord(
+        job_id="j-7", state="running", mode="review", question_head="q",
+        session_id="s", pid=dead.pid, created_at=time.time(),
+    )
+    (jobs_dir / "j-7.json").write_text(json.dumps(asdict(rec)), encoding="utf-8")
+    (jobs_dir / "j-7.stdout").write_text(json.dumps(PAYLOAD), encoding="utf-8")
+    (jobs_dir / "j-7.stderr").write_text("", encoding="utf-8")
+
+    completions: list[str] = []
+    lock = threading.Lock()
+
+    def on_complete(record, result):
+        with lock:
+            completions.append(record.job_id)
+
+    errors: list[Exception] = []
+    results: list[str] = []
+
+    def recover() -> None:
+        try:
+            registry = JobRegistry(config, on_complete=on_complete)
+            results.append(registry.get("j-7").state)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=recover) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []  # tmp 충돌 크래시 없음
+    assert results == ["completed", "completed"]
+    assert completions == ["j-7"]  # 종결 훅은 정확히 한 번

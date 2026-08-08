@@ -11,9 +11,11 @@ agy 프로세스는 분리 실행(detached)하고 stdout/stderr를 파이프가 
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
 import threading
@@ -106,16 +108,42 @@ class JobRegistry:
     def _stderr_path(self, job_id: str) -> Path:
         return self._jobs_dir / f"{job_id}.stderr"
 
+    @contextlib.contextmanager
+    def _job_lock(self, job_id: str):
+        """한 job의 read-modify-write(_finalize·cancel)를 스레드 락 + fcntl.flock으로
+        감싼다. 같은 상태 디렉터리를 공유하는 다른 브리지 프로세스(같은 저장소의
+        다중 세션, §7.4)가 동시에 종결·취소를 시도해도 레코드 전이가 원자적이어야
+        한다 — 아니면 취소가 재시도로 되살아나거나(cancel resurrection) 고아 회수가
+        이중 종결된다. job id 선점(O_EXCL)은 배정만, 이 락은 전이를 지킨다."""
+        lock_path = self._jobs_dir / f"{job_id}.lock"
+        # flock을 self._lock보다 먼저 잡는다 — 이웃 프로세스가 flock을 쥔 채
+        # 정지해도 이 프로세스의 self._lock(다른 job 연산 공용)까지 붙잡히지
+        # 않는다. 락 순서는 어디서나 flock→self._lock으로 일관된다.
+        with open(lock_path, "w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                with self._lock:
+                    yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
     # ── 영속화 ───────────────────────────────────────────
 
     def _persist(self, record: JobRecord) -> None:
         path = self._record_path(record.job_id)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(asdict(record), ensure_ascii=False, indent=1),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        # tmp 이름에 pid+난수를 넣어 다른 프로세스의 동시 _persist와 충돌하지
+        # 않게 한다 — 고정 이름이면 한쪽 tmp.replace가 FileNotFoundError로 크래시.
+        tmp = path.with_suffix(f".json.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(asdict(record), ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                tmp.unlink()
+            raise
 
     def _load_from_disk(self, job_id: str) -> JobRecord | None:
         path = self._record_path(job_id)
@@ -196,6 +224,7 @@ class JobRegistry:
         )
 
         claimed_here = job_id is None
+        process: subprocess.Popen | None = None
         try:
             with self._lock:
                 if job_id is None:
@@ -221,16 +250,31 @@ class JobRegistry:
                 if context_server is not None:
                     self._servers[job_id] = context_server
                 self._persist(record)
+            # 워처 기동을 try 안에 둔다 — 스폰 성공 뒤 _persist·Thread.start()가
+            # 실패하면 이미 뜬 프로세스가 무감시로 남고 원장엔 spawn_failed로
+            # 오기록된다. 그 경우 except에서 프로세스를 죽여 정합을 지킨다.
+            self._start_watcher(job_id, process)
         except Exception:
-            # 스폰 실패 시에도 서버를 유휴 상태로 남기지 않는다 (§10.1).
-            # 여기서 선점한 id는 반납한다 — 밖에서 선점한 id는 호출자 몫이다.
-            if claimed_here and job_id is not None:
-                self.release_claim(job_id)
+            if process is not None and process.poll() is None:
+                self._kill_group(process.pid)
+                with contextlib.suppress(Exception):
+                    process.wait(timeout=5)
+            if job_id is not None:
+                with self._lock:
+                    self._records.pop(job_id, None)
+                    self._events.pop(job_id, None)
+                    self._watched.discard(job_id)
+                    self._commands.pop(job_id, None)
+                    self._servers.pop(job_id, None)
+                    with contextlib.suppress(FileNotFoundError):
+                        self._record_path(job_id).unlink()  # 실패한 start는 흔적 없음
+                # 여기서 선점한 id만 반납한다 — 밖에서 선점한 id는 호출자 몫이다.
+                if claimed_here:
+                    self.release_claim(job_id)
             if context_server is not None:
                 context_server.close()
             raise
 
-        self._start_watcher(job_id, process)
         return record
 
     def _spawn(self, job_id: str, cmd: list[str]) -> subprocess.Popen:
@@ -276,9 +320,27 @@ class JobRegistry:
         retry_process: subprocess.Popen | None = None
         server: _SupportsClose | None = None
         event: threading.Event | None = None
-        with self._lock:
-            record = self._records.get(job_id) or self._load_from_disk(job_id)
-            if record is None or record.state in TERMINAL_STATES:
+        with self._job_lock(job_id):
+            disk = self._load_from_disk(job_id)
+            record = self._records.get(job_id) or disk
+            if record is None:
+                return
+            # 디스크가 권위다: 다른 브리지 프로세스가 이미 종결·취소했으면 메모리의
+            # 낡은 running 레코드로 덮어쓰지 않는다 (cancel resurrection·이중 종결
+            # 방지). 자기 메모리가 이미 종결이면 재진입도 차단한다.
+            if disk is not None and disk.state in TERMINAL_STATES:
+                self._records[job_id] = disk
+                self._watched.discard(job_id)
+                self._commands.pop(job_id, None)
+                server = self._servers.pop(job_id, None)
+                # 로컬 대기자(wait())도 즉시 깨운다 — 종결은 다른 프로세스가 했다.
+                event = self._events.get(job_id)
+                if server is not None:
+                    server.close()
+                if event is not None:
+                    event.set()
+                return
+            if record.state in TERMINAL_STATES:
                 return
 
             result: AgyResult | None = None
@@ -302,11 +364,20 @@ class JobRegistry:
                 except AgyError as exc:
                     if self._is_retryable(exc) and record.attempts < self.MAX_ATTEMPTS \
                             and job_id in self._commands:
-                        record.attempts += 1
-                        retry_process = self._spawn(job_id, self._commands[job_id])
-                        record.pid = retry_process.pid
-                        self._records[job_id] = record
-                        self._persist(record)
+                        try:
+                            retry_process = self._spawn(job_id, self._commands[job_id])
+                        except OSError as spawn_exc:
+                            # 재시도 스폰 자체가 실패(fork EAGAIN/바이너리 소실 등).
+                            # 보호 없이 두면 감시 스레드가 죽어 job이 영구 running.
+                            record.state = "failed"
+                            record.error = (
+                                f"재시도 스폰 실패: {spawn_exc}. 원 오류: {exc}"
+                            )
+                        else:
+                            record.attempts += 1
+                            record.pid = retry_process.pid
+                            self._records[job_id] = record
+                            self._persist(record)
                     else:
                         record.state = "failed"
                         record.error = str(exc)
@@ -322,9 +393,12 @@ class JobRegistry:
                 event = self._events.setdefault(job_id, threading.Event())
 
         if retry_process is not None:
-            if self._on_retry is not None:
-                self._on_retry(record)
+            # 워처를 먼저 붙인 뒤 훅을 부른다 — 훅(원장 기록)이 I/O 오류로 예외를
+            # 던져도 재시도 프로세스가 무감시로 남지 않는다.
             self._start_watcher(job_id, retry_process)
+            if self._on_retry is not None:
+                with contextlib.suppress(Exception):
+                    self._on_retry(record)
             return
 
         if server is not None:
@@ -410,14 +484,20 @@ class JobRegistry:
         if record.state in TERMINAL_STATES:
             return record
 
-        with self._lock:
+        with self._job_lock(job_id):
+            # 디스크 권위 재확인 — 다른 프로세스가 이미 종결·취소했을 수 있다.
+            disk = self._load_from_disk(job_id)
+            if disk is not None and disk.state in TERMINAL_STATES:
+                self._records[job_id] = disk
+                return disk
             record = self._records.get(job_id) or record
             if record.state in TERMINAL_STATES:
                 return record
             event = self._events.setdefault(job_id, threading.Event())
             pid = record.pid
-            # 프로세스를 죽이기 전에 먼저 cancelled로 표시한다 — 감시 스레드의
-            # _finalize가 프로세스 사망을 failed로 오인해 덮어쓰는 경합을 막는다.
+            # 프로세스를 죽이기 전에 먼저 cancelled를 (같은 per-job 락 아래) 디스크에
+            # 영속화한다 — 소유 프로세스의 _finalize가 디스크를 재로드해 이 상태를
+            # 존중하므로, 프로세스 사망을 failed·retry로 오인해 덮어쓰지 않는다.
             record.state = "cancelled"
             record.error = "사용자 요청으로 중단됨 (agy_cancel)."
             record.finished_at = time.time()
