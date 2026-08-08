@@ -82,11 +82,22 @@ class Ledger:
                  "mode": mode, "retry": True}
             )
 
-    def record_spawn_failed(self, job_id: str) -> None:
-        """선기록된 start가 스폰에 실패했다 — 보정 엔트리로 계수에서 뺀다."""
+    def record_spawn_failed(self, job_id: str, *, date: str | None = None) -> None:
+        """선기록된 start가 스폰에 실패했다 — 보정 엔트리로 계수에서 뺀다.
+
+        date는 상쇄 대상 start가 기록된 날짜다. 자정 직전 start가 자정 직후
+        실패해도 보정이 원래 날짜의 계수에서 빠지도록, 호출 시점이 아니라 start의
+        날짜를 쓴다 (자체 리뷰). 없으면 job_id로 원장에서 start를 찾고, 그래도
+        못 찾으면 오늘로 폴백한다."""
         with self._exclusive():
+            if date is None:
+                date = next(
+                    (e.get("date") for e in reversed(self._entries())
+                     if e.get("event") == "start" and e.get("job_id") == job_id),
+                    _today(),
+                )
             self._append(
-                {"event": "spawn_failed", "date": _today(), "job_id": job_id}
+                {"event": "spawn_failed", "date": date, "job_id": job_id}
             )
 
     def record_finish(
@@ -128,15 +139,18 @@ class Ledger:
 
     def check_and_record_start(
         self, job_id: str, *, mode: str, model: str, limit: int
-    ) -> None:
+    ) -> str:
         """확인과 기록을 한 임계구역에서 수행한다 (리뷰 #5-1). 스폰 전에 기록하므로
-        초과 스폰이 원천 차단된다 — 스폰이 실패하면 record_spawn_failed로 보정하라."""
+        초과 스폰이 원천 차단된다 — 스폰이 실패하면 반환된 날짜로
+        record_spawn_failed를 불러 같은 날 계수에서 정확히 뺀다."""
         with self._exclusive():
             self._raise_if_exceeded(self.calls_today(), limit)
+            date = _today()
             self._append(
-                {"event": "start", "date": _today(), "job_id": job_id,
+                {"event": "start", "date": date, "job_id": job_id,
                  "mode": mode, "model": model}
             )
+        return date
 
     # ── 리포트 ───────────────────────────────────────────
 

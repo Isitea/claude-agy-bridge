@@ -17,7 +17,7 @@ import anyio
 from mcp.server.mcpserver import MCPServer
 
 from agy_bridge import __version__
-from agy_bridge.budget import BudgetExceeded, Ledger
+from agy_bridge.budget import Ledger
 from agy_bridge.config import Config, StartupError, load_config
 from agy_bridge.context import PreparedContext, prepare_context
 from agy_bridge.jobs import TERMINAL_STATES, JobRecord, JobRegistry, UnknownJob
@@ -194,7 +194,13 @@ def build_server(config: Config) -> MCPServer:
                 "elapsed_s": record.elapsed_s(),
             }
         # failed | timeout — 실패는 조용히 넘어가지 않는다 (§2.3-A)
-        raise RuntimeError(f"job {record.job_id} {record.state}: {record.error}")
+        cost_note = ""
+        if record.attempts > 1:
+            # 재시도 후 최종 실패 — 토큰 비용이 중복 발생했음을 알린다 (자체 리뷰)
+            cost_note = f" (재시도 {record.attempts}회, 토큰 비용 중복 발생)"
+        raise RuntimeError(
+            f"job {record.job_id} {record.state}{cost_note}: {record.error}"
+        )
 
     def _served_block(server: ContextServer, prepared: PreparedContext) -> str:
         lines = [
@@ -289,11 +295,13 @@ def build_server(config: Config) -> MCPServer:
             # 스폰이 실패하면 보정 엔트리로 되돌린다.
             job_id = registry.claim_job_id()
             try:
-                ledger.check_and_record_start(
+                start_date = ledger.check_and_record_start(
                     job_id, mode=mode, model=model or config.model,
                     limit=config.daily_call_budget,
                 )
-            except BudgetExceeded:
+            except Exception:
+                # BudgetExceeded뿐 아니라 원장 I/O 오류(ENOSPC 등)에서도 선점 id를
+                # 반납한다 — 아니면 빈 j-N.json이 영구히 남아 이후 id를 건너뛴다.
                 registry.release_claim(job_id)
                 raise
             try:
@@ -314,7 +322,8 @@ def build_server(config: Config) -> MCPServer:
                     job_id=job_id,
                 )
             except Exception:
-                ledger.record_spawn_failed(job_id)
+                # 선기록한 start를 같은 날 계수에서 정확히 상쇄한다 (자정 경계)
+                ledger.record_spawn_failed(job_id, date=start_date)
                 registry.release_claim(job_id)
                 raise
         except Exception:

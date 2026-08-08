@@ -111,3 +111,40 @@ def test_retry_counts_toward_budget(bridge_config):
     report = ledger.report(60)
     assert report["calls_started"] == 2
     assert report["retries"] == 1
+
+
+def test_check_and_record_returns_start_date(bridge_config):
+    ledger = Ledger(bridge_config())
+    date = ledger.check_and_record_start("j-1", mode="review", model="m", limit=5)
+    assert isinstance(date, str) and date  # ISO 날짜
+    assert ledger.calls_today() == 1
+
+
+def test_spawn_failed_compensates_original_day(bridge_config, monkeypatch):
+    """후속 D: 자정 경계 — start(D)가 D+1에 실패 보정돼도 D의 계수에서 빠져야 한다.
+    call-time 날짜를 쓰면 D는 영구히 부풀고 D+1은 상한을 1회 더 허용했다."""
+    import agy_bridge.budget as budget_mod
+
+    ledger = Ledger(bridge_config())
+    monkeypatch.setattr(budget_mod, "_today", lambda: "2026-08-08")
+    start_date = ledger.check_and_record_start("j-1", mode="review", model="m", limit=5)
+
+    # 자정을 넘겨 보정이 다음 날 실행되지만, start의 날짜로 상쇄한다
+    monkeypatch.setattr(budget_mod, "_today", lambda: "2026-08-09")
+    ledger.record_spawn_failed("j-1", date=start_date)
+
+    # D+1 관점: 대응 없는 spawn_failed가 남아 상한을 갉아먹지 않아야 한다
+    assert ledger.calls_today() == 0  # 2026-08-09엔 start도 spawn_failed도 없음
+    ledger.check_and_record_start("j-2", mode="review", model="m", limit=1)  # 통과해야
+
+
+def test_spawn_failed_finds_date_by_job_id(bridge_config, monkeypatch):
+    """date 미지정 시 job_id로 원장에서 start 날짜를 찾아 상쇄한다."""
+    import agy_bridge.budget as budget_mod
+
+    ledger = Ledger(bridge_config())
+    monkeypatch.setattr(budget_mod, "_today", lambda: "2026-08-08")
+    ledger.check_and_record_start("j-1", mode="review", model="m", limit=5)
+    monkeypatch.setattr(budget_mod, "_today", lambda: "2026-08-09")
+    ledger.record_spawn_failed("j-1")  # date 생략 → job_id로 조회
+    assert ledger.calls_today() == 0
