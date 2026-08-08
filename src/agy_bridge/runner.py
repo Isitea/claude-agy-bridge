@@ -173,6 +173,16 @@ def parse_agy_output(
             stderr=stderr,
         ) from exc
 
+    if not isinstance(payload, dict):
+        # 계약: 이 함수의 모든 실패는 AgyError다. dict가 아니면 .get에서
+        # AttributeError가 새어 나가 감시 스레드를 죽인다.
+        raise AgyError(
+            f"agy stdout이 JSON 객체가 아니다 ({type(payload).__name__}).",
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
     status = payload.get("status")
     if status != "SUCCESS":
         raise AgyError(
@@ -183,6 +193,13 @@ def parse_agy_output(
         )
 
     response = payload.get("response") or ""
+    if not isinstance(response, str):
+        raise AgyError(
+            f"agy response가 문자열이 아니다 ({type(response).__name__}).",
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
     structured = payload.get("structured_output")
     if not response.strip() and structured in (None, "", {}, []):
         # 가장 위험한 실패 모드의 승격 지점 (§2.3-A). status만 믿으면 안 된다.

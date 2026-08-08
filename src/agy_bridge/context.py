@@ -66,10 +66,16 @@ def parse_spec(spec: str) -> tuple[str, int | None, int | None]:
 
 
 def _is_denied(path: Path, deny_globs: tuple[str, ...]) -> bool:
+    """구분자가 든 패턴(*/.ssh/* 등)만 전체 경로에, 나머지는 파일명에만 맞춘다.
+
+    앵커 없는 부분일치 패턴(*token*, *_key* …)을 절대경로 전체에 적용하면
+    token-service·secretary-app 같은 이름의 저장소나 사용자명 하나로 그 안의
+    모든 파일이 자격증명으로 오인돼 거부된다.
+    """
     name = path.name
     full = path.as_posix()
     return any(
-        fnmatch.fnmatch(name, glob) or fnmatch.fnmatch(full, glob)
+        fnmatch.fnmatch(full, glob) if "/" in glob else fnmatch.fnmatch(name, glob)
         for glob in deny_globs
     )
 
@@ -115,28 +121,40 @@ def _render_spec(
             "자료의 별칭일 수 있다). 사본을 만들어 지정하라."
         )
 
-    lines = abs_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    # splitlines()는 \x0c·\x0b·\x1c·\x85·U+2028에서도 쪼개서, 붙여 주는 "절대 행
+    # 번호"가 grep -n·wc -l과 어긋난다 (§4.4 location 계약 위반). \n으로만 나눈다.
+    text = abs_path.read_text(encoding="utf-8", errors="replace")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # 개행으로 끝나는 파일의 꼬리 빈 조각
     total_lines = len(lines)
 
     if start is None:
         start, end = 1, total_lines
     assert end is not None
-    if start < 1 or (total_lines and start > total_lines):
-        raise ContextError(f"{spec}: 시작 행 {start}이 파일 범위(1-{total_lines}) 밖이다")
-    end = min(end, total_lines)
-    if end < start:
-        raise ContextError(f"{spec}: 행범위가 비었다 ({start}-{end})")
+    if total_lines == 0:
+        # 빈 파일(흔한 빈 __init__.py)은 오류가 아니다 — 빈 블록으로 넘긴다.
+        # 예전에는 falsy-zero 가드를 빠져나가 "행범위가 비었다 (1-0)"로 호출
+        # 전체를 죽였다.
+        start, end, selected = 1, 0, []
+    else:
+        if start < 1 or start > total_lines:
+            raise ContextError(
+                f"{spec}: 시작 행 {start}이 파일 범위(1-{total_lines}) 밖이다"
+            )
+        end = min(end, total_lines)
+        if end < start:
+            raise ContextError(f"{spec}: 행범위가 비었다 ({start}-{end})")
+        selected = lines[start - 1 : end]
 
-    selected = lines[start - 1 : end]
-    width = len(str(end))
+    width = len(str(end)) or 1
     numbered = "\n".join(
         f"{number:>{width}}| {line}"
         for number, line in enumerate(selected, start=start)
     )
 
-    block = (
-        f"--- FILE {display} [{start}-{end}행 / 총 {total_lines}행] ---\n{numbered}"
-    )
+    span = "빈 파일" if total_lines == 0 else f"{start}-{end}행"
+    block = f"--- FILE {display} [{span} / 총 {total_lines}행] ---\n{numbered}"
     return {
         "spec": spec,
         "display": display,
@@ -189,6 +207,20 @@ class PreparedContext:
     served_manifest: list[dict]
     strategy: str                     # "inline" | "mixed" | "serve"
     reason: str | None
+
+
+def _unique_name(base_name: str, used: set[str]) -> str:
+    """'/'→'__' 치환은 단사가 아니라 a/b.txt와 a__b.txt가 같은 이름이 된다.
+    충돌하면 접미사를 붙여 한쪽이 조용히 사라지는 것을 막는다."""
+    if base_name not in used:
+        used.add(base_name)
+        return base_name
+    index = 2
+    while f"{base_name}__{index}" in used:
+        index += 1
+    unique = f"{base_name}__{index}"
+    used.add(unique)
+    return unique
 
 
 def _chunk_into(
@@ -248,6 +280,7 @@ def prepare_context(
     total_bytes = 0
     budget_bytes = _budget_bytes(max_chars, reserved_bytes)
     overflowed = False
+    used_names: set[str] = set()
 
     for item in rendered:
         if (
@@ -265,7 +298,10 @@ def prepare_context(
             )
         else:
             overflowed = True
-            base_name = item["display"].replace("/", "__") + f"__L{item['lines']}"
+            base_name = _unique_name(
+                item["display"].replace("/", "__") + f"__L{item['lines']}",
+                used_names,
+            )
             names = _chunk_into(to_serve, base_name, item["block"])
             served_manifest.append(
                 {"file": item["display"], "lines": item["lines"],

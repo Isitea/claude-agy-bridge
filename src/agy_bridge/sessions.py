@@ -41,9 +41,12 @@ class SessionStore:
             return {}
         try:
             return json.loads(self._path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             # 세션 파일 손상은 치명적이지 않다 — 새로 시작하되 원본은 남겨 둔다.
-            self._path.rename(self._path.with_suffix(".json.corrupt"))
+            # UnicodeDecodeError(찢어진 쓰기)는 JSONDecodeError가 아니므로 함께
+            # 잡지 않으면 호출자(감시 스레드 포함)로 새어 나간다.
+            with contextlib.suppress(OSError):
+                self._path.rename(self._path.with_suffix(".json.corrupt"))
             return {}
 
     def _save(self, sessions: dict) -> None:

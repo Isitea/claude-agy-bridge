@@ -16,6 +16,7 @@ from __future__ import annotations
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote, unquote, urlsplit
 
 _BIND_HOST = "127.0.0.1"  # 하드코딩 — 설정 노출 금지 (§10.1)
 
@@ -48,8 +49,17 @@ class ContextServer:
                 self._serve(head=True)
 
             def _serve(self, head: bool):
+                # 요청 타깃은 퍼센트 인코딩된 경로 + 선택적 쿼리스트링이다. 원문
+                # 비교하면 한글·공백이 든 이름은 어떤 정상 클라이언트로도 받을 수
+                # 없고(비ASCII는 요청 라인에 그대로 실을 수조차 없다), 캐시 무효화
+                # 쿼리가 붙어도 404가 된다.
+                raw_path = urlsplit(self.path).path
+                try:
+                    decoded = unquote(raw_path, errors="strict")
+                except UnicodeDecodeError:
+                    decoded = raw_path
                 prefix = f"/{token}/"
-                name = self.path[len(prefix):] if self.path.startswith(prefix) else None
+                name = decoded[len(prefix):] if decoded.startswith(prefix) else None
                 content = snapshot.get(name) if name else None
                 if content is None:
                     self._reply(404, b"not found", head=head)
@@ -95,7 +105,8 @@ class ContextServer:
         return f"http://{_BIND_HOST}:{self._port}/{self._token}"
 
     def url_for(self, name: str) -> str:
-        return f"{self.base_url}/{name}"
+        # 광고하는 URL도 유효한 요청 타깃이어야 한다 — 비ASCII·공백은 인코딩한다.
+        return f"{self.base_url}/{quote(name)}"
 
     @property
     def port(self) -> int:

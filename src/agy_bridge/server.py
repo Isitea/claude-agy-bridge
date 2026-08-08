@@ -9,9 +9,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import signal
 import sys
 from functools import partial
 from typing import Literal
+from urllib.parse import quote
 
 import anyio
 from mcp.server.mcpserver import MCPServer
@@ -22,7 +25,11 @@ from agy_bridge.config import Config, StartupError, load_config
 from agy_bridge.context import PreparedContext, prepare_context
 from agy_bridge.jobs import TERMINAL_STATES, JobRecord, JobRegistry, UnknownJob
 from agy_bridge.prompts import assemble_prompt, compose_playbooks_block
-from agy_bridge.schemas import structured_default, verdict_schema_json
+from agy_bridge.schemas import (
+    structured_default,
+    validate_verdict,
+    verdict_schema_json,
+)
 from agy_bridge.serve import ContextServer
 from agy_bridge.sessions import SessionStore
 
@@ -163,8 +170,30 @@ def build_server(config: Config) -> MCPServer:
             }
             if record.session_id:
                 payload["session_id"] = record.session_id
-            if record.result.get("structured_output") is not None:
-                payload["verdict"] = record.result["structured_output"]
+            structured_output = record.result.get("structured_output")
+            if structured_output is not None:
+                payload["verdict"] = structured_output
+                problems = validate_verdict(structured_output)
+                if problems:
+                    # 스키마 위반을 조용히 통과시키면 소비 세션이 엉뚱한 값을
+                    # 판정으로 읽는다 (§4.4).
+                    payload["verdict_valid"] = False
+                    payload["verdict_problems"] = problems
+                    payload["verdict_note"] = (
+                        "검증자가 반환한 판정이 스키마를 지키지 않았다 — "
+                        "verdict를 통과로 해석하지 마라. response 본문을 직접 "
+                        "읽고, 필요하면 질문을 좁혀 재시도하라."
+                    )
+            elif record.structured:
+                # 구조화를 요구했는데 판정이 없다. 침묵을 통과로 오독하는 것이
+                # 이 시스템 최악의 실패이므로(§2.3-A) 부재를 명시한다.
+                payload["verdict_valid"] = False
+                payload["verdict_missing"] = True
+                payload["verdict_note"] = (
+                    "구조화 판정을 요구했으나 검증자가 스키마를 무시하고 산문만 "
+                    "반환했다. 판정 부재를 통과로 해석하지 마라 — response를 "
+                    "직접 검토하거나 질문을 좁혀 재시도하라."
+                )
             if record.attempts > 1:
                 # 비용 인식·신뢰도 판단 재료 (리뷰 #5-3)
                 payload["attempts"] = record.attempts
@@ -202,7 +231,12 @@ def build_server(config: Config) -> MCPServer:
             f"job {record.job_id} {record.state}{cost_note}: {record.error}"
         )
 
-    def _served_block(server: ContextServer, prepared: PreparedContext) -> str:
+    def _dummy_url_for(name: str) -> str:
+        """실제 서버를 띄우기 전에 서빙 블록 크기를 재기 위한 최대 길이 URL.
+        포트 5자리 + token_urlsafe(16)의 22자로 실제보다 짧아지지 않는다."""
+        return f"http://127.0.0.1:65535/{'x' * 22}/{quote(name)}"
+
+    def _served_block(url_for, prepared: PreparedContext) -> str:
         lines = [
             "--- 추가 자료 (루프백 HTTP 서빙) ---",
             "아래 파일은 크기 때문에 프롬프트에 싣지 않고 로컬 URL로 제공한다.",
@@ -214,21 +248,20 @@ def build_server(config: Config) -> MCPServer:
             (
                 "인라이닝과 동일하게 각 행 앞에 원본 절대 행 번호가 붙어 있다."
             ),
-            f"목록: {server.url_for('INDEX')}",
+            f"목록: {url_for('INDEX')}",
         ]
         for item in prepared.served_manifest:
             names = item["serve_names"]
             if len(names) == 1:
                 lines.append(
-                    f"- {item['file']} [{item['lines']}행]: "
-                    f"{server.url_for(names[0])}"
+                    f"- {item['file']} [{item['lines']}행]: {url_for(names[0])}"
                 )
             else:
                 lines.append(
                     f"- {item['file']} [{item['lines']}행] — {len(names)}개 부분으로 "
                     "분할됨. 답하기 전에 아래 부분 URL을 **하나도 빠짐없이** 읽어라:"
                 )
-                lines.extend(f"  {server.url_for(name)}" for name in names)
+                lines.extend(f"  {url_for(name)}" for name in names)
         return "\n".join(lines)
 
     def _start_and_wait(
@@ -258,28 +291,48 @@ def build_server(config: Config) -> MCPServer:
             overlay_dir=config.overlay_dir,
             enabled=config.playbooks_enabled,
         )
-        overhead = assemble_prompt(
-            mode=mode, question=question, context=context,
-            files_block="", playbooks_block=playbooks_block, structured=structured,
-        )
-        reserved_bytes = len(overhead.encode("utf-8"))
+        def _overhead_bytes(files_block: str) -> int:
+            return len(
+                assemble_prompt(
+                    mode=mode, question=question, context=context,
+                    files_block=files_block, playbooks_block=playbooks_block,
+                    structured=structured,
+                ).encode("utf-8")
+            ) - len(files_block.encode("utf-8"))
+
+        # files_block이 있을 때만 붙는 "## 검토 대상 파일" 머리말까지 포함해서 잰다
+        reserved_bytes = _overhead_bytes("x")
 
         prepared: PreparedContext | None = None
         if files:
-            prepared = prepare_context(
-                files,
-                project_root=config.project_root,
-                deny_globs=config.deny_globs,
-                max_chars=config.max_inline_chars,
-                reserved_bytes=reserved_bytes,
-            )
+            # 서빙 URL 블록도 argv 공간을 먹는데 prepare_context가 예산을 다 쓴
+            # 뒤에 붙는다. 그래서 더미 URL로 그 크기를 재어 예산에 반영하고,
+            # 반영 결과 서빙 대상이 늘면 한 번 더 수렴시킨다 — 아니면 argv 초과를
+            # 막으려 존재하는 폴백이 도리어 초과의 원인이 된다.
+            served_reserve = 0
+            for _ in range(3):
+                prepared = prepare_context(
+                    files,
+                    project_root=config.project_root,
+                    deny_globs=config.deny_globs,
+                    max_chars=config.max_inline_chars,
+                    reserved_bytes=reserved_bytes + served_reserve,
+                )
+                if not prepared.to_serve:
+                    break
+                estimate = len(
+                    _served_block(_dummy_url_for, prepared).encode("utf-8")
+                )
+                if estimate <= served_reserve:
+                    break
+                served_reserve = estimate
 
         context_server: ContextServer | None = None
         try:
             files_block = prepared.files_block if prepared else ""
             if prepared and prepared.to_serve:
                 context_server = ContextServer(prepared.to_serve)
-                block = _served_block(context_server, prepared)
+                block = _served_block(context_server.url_for, prepared)
                 files_block = f"{files_block}\n\n{block}" if files_block else block
 
             prompt = assemble_prompt(
@@ -320,6 +373,7 @@ def build_server(config: Config) -> MCPServer:
                     strategy_reason=prepared.reason if prepared else None,
                     context_server=context_server,
                     job_id=job_id,
+                    structured=structured,
                 )
             except Exception:
                 # 선기록한 start를 같은 날 계수에서 정확히 상쇄한다 (자정 경계)
@@ -472,6 +526,8 @@ def build_server(config: Config) -> MCPServer:
 
         return await anyio.to_thread.run_sync(_snapshot)
 
+    # serve()가 종료 시 정리(§10.1)에 쓴다. MCPServer는 이 필드를 모르므로 동적 부착.
+    setattr(server, "agy_registry", registry)  # noqa: B010
     return server
 
 
@@ -488,5 +544,31 @@ def serve() -> int:
         f"model={config.model} (stdio)",
         file=sys.stderr,
     )
-    build_server(config).run(transport="stdio")
+    server = build_server(config)
+    registry: JobRegistry = getattr(server, "agy_registry")  # noqa: B009
+
+    def _cleanup() -> None:
+        # 루프백 서버는 이 프로세스와 함께 죽는다. 서빙 자료에 의존하던 job을
+        # 그대로 두면 자료를 못 읽은 답이 나중에 completed로 회수된다 (§10.1).
+        stopped = registry.shutdown()
+        if stopped:
+            print(
+                f"agy-bridge: 종료하며 서빙 의존 job {len(stopped)}건 중단 "
+                f"({', '.join(stopped)})",
+                file=sys.stderr,
+            )
+
+    def _on_signal(signum, _frame):
+        # 기본 SIGTERM은 finally를 돌리지 않고 즉사시킨다 — 정리 후 나간다.
+        _cleanup()
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(signum, _on_signal)
+
+    try:
+        server.run(transport="stdio")
+    finally:
+        _cleanup()  # stdio 종료·예외 경로 (shutdown은 멱등이다)
     return 0

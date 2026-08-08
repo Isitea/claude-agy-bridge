@@ -20,7 +20,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Protocol
 
@@ -62,6 +62,10 @@ class JobRecord:
     strategy: str = "inline"                        # inline | mixed | serve
     strategy_reason: str | None = None              # auto 전환 사유 — 도구 결과에 명시
     attempts: int = 1                               # 인프라 실패 재시도 횟수 포함
+    structured: bool = False                        # 구조화 판정을 요구한 호출인가
+    # pid 재사용 판별용 시작 시각(/proc의 starttime, 클럭틱). 재부팅 뒤 낮은 pid는
+    # 재할당되므로 이것 없이는 남의 프로세스를 죽일 수 있다.
+    pid_starttime: int | None = None
 
     def elapsed_s(self) -> float:
         end = self.finished_at if self.finished_at is not None else time.time()
@@ -151,11 +155,19 @@ class JobRegistry:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             # 다른 프로세스가 선점만 하고 아직 _persist하지 않은 빈 파일 —
             # 그 프로세스만 의미를 아는 상태이므로 여기서는 없는 것으로 본다.
             return None
-        return JobRecord(**data)
+        if not isinstance(data, dict):
+            return None
+        # 공유 상태 디렉터리(§7.4)에 신버전 브리지가 필드를 더 쓸 수 있다.
+        # 모르는 키로 TypeError를 내면 감시 스레드가 죽으므로 걸러 낸다.
+        known = {f.name for f in fields(JobRecord)}
+        try:
+            return JobRecord(**{k: v for k, v in data.items() if k in known})
+        except TypeError:
+            return None
 
     def _next_job_id(self) -> str:
         """O_CREAT|O_EXCL로 레코드 파일을 선점해 id를 원자적으로 배정한다.
@@ -212,6 +224,7 @@ class JobRegistry:
         strategy_reason: str | None = None,
         context_server: _SupportsClose | None = None,  # 서버 수명 = job 수명 (§10.1)
         job_id: str | None = None,  # claim_job_id()로 미리 선점한 id (§13)
+        structured: bool = False,   # 구조화 판정 요구 여부 — 결과 검증에 쓴다
     ) -> JobRecord:
         ensure_prompt_within_argv_limit(prompt)
         cmd = build_command(
@@ -237,11 +250,13 @@ class JobRegistry:
                     question_head=question[:200],
                     session_id=session_id,
                     pid=process.pid,
+                    pid_starttime=_pid_starttime(process.pid),
                     created_at=time.time(),
                     reviewed=reviewed or [],
                     served=served or [],
                     strategy=strategy,
                     strategy_reason=strategy_reason,
+                    structured=structured,
                 )
                 self._records[job_id] = record
                 self._events[job_id] = threading.Event()
@@ -307,7 +322,36 @@ class JobRegistry:
             process.wait()
             returncode = None
             timed_out = True
-        self._finalize(job_id, returncode=returncode, timed_out=timed_out)
+        try:
+            self._finalize(job_id, returncode=returncode, timed_out=timed_out)
+        except Exception as exc:  # noqa: BLE001 — 감시 스레드는 절대 조용히 죽으면 안 된다
+            # 여기서 죽으면 _watched에 job_id가 남아 고아 회수가 영구히 막히고
+            # job이 running에 고착된다. 최선을 다해 failed로 종결시킨다.
+            self._force_fail(job_id, f"종결 처리 중 예외: {exc!r}")
+
+    def _force_fail(self, job_id: str, reason: str) -> None:
+        """종결 경로 자체가 실패했을 때의 마지막 안전망. 무슨 일이 있어도
+        예외를 내지 않고, 대기자와 서버를 반드시 정리한다."""
+        server = None
+        event = None
+        with contextlib.suppress(Exception), self._lock:
+            record = self._records.get(job_id)
+            if record is not None and record.state not in TERMINAL_STATES:
+                record.state = "failed"
+                record.error = reason
+                record.finished_at = time.time()
+                record.pid = None
+                with contextlib.suppress(Exception):
+                    self._persist(record)
+            self._watched.discard(job_id)
+            self._commands.pop(job_id, None)
+            server = self._servers.pop(job_id, None)
+            event = self._events.get(job_id)
+        if server is not None:
+            with contextlib.suppress(Exception):
+                server.close()
+        if event is not None:
+            event.set()
 
     def _finalize(
         self, job_id: str, *, returncode: int | None, timed_out: bool
@@ -364,18 +408,27 @@ class JobRegistry:
                 except AgyError as exc:
                     if self._is_retryable(exc) and record.attempts < self.MAX_ATTEMPTS \
                             and job_id in self._commands:
+                        record.attempts += 1  # 훅은 "이제 시작할 회차"를 본다
                         try:
+                            # 훅이 예산을 확인하고 선기록한다 — 스폰 전에 부르므로
+                            # 토큰을 두 번 쓰는 이 경로에서도 "스폰 전 거부"가
+                            # 성립한다. 거부(BudgetExceeded)나 I/O 오류는 예외로
+                            # 올라와 재시도를 취소시킨다.
+                            if self._on_retry is not None:
+                                self._on_retry(record)
                             retry_process = self._spawn(job_id, self._commands[job_id])
-                        except OSError as spawn_exc:
-                            # 재시도 스폰 자체가 실패(fork EAGAIN/바이너리 소실 등).
+                        except Exception as retry_exc:  # noqa: BLE001
+                            # 재시도 거부·스폰 실패(fork EAGAIN, 바이너리 소실 등).
                             # 보호 없이 두면 감시 스레드가 죽어 job이 영구 running.
+                            retry_process = None
+                            record.attempts -= 1  # 실제로 뜨지 않았다
                             record.state = "failed"
                             record.error = (
-                                f"재시도 스폰 실패: {spawn_exc}. 원 오류: {exc}"
+                                f"재시도 스폰 실패: {retry_exc}. 원 오류: {exc}"
                             )
                         else:
-                            record.attempts += 1
                             record.pid = retry_process.pid
+                            record.pid_starttime = _pid_starttime(retry_process.pid)
                             self._records[job_id] = record
                             self._persist(record)
                     else:
@@ -385,29 +438,36 @@ class JobRegistry:
             if retry_process is None:
                 record.finished_at = time.time()
                 record.pid = None
+                record.pid_starttime = None
+                self._watched.discard(job_id)
+                self._commands.pop(job_id, None)
+                server = self._servers.pop(job_id, None)
+                # 서버는 종결 상태를 공개하기 **전에** 닫는다 (§10.1 서버 수명 =
+                # job 수명). 락을 푼 뒤에 닫으면 그 창에서 관측자가 completed를
+                # 보는데 포트는 아직 열려 있다.
+                if server is not None:
+                    with contextlib.suppress(Exception):
+                        server.close()
+                    server = None
                 self._records[job_id] = record
                 self._persist(record)
-                self._watched.discard(job_id)
-                server = self._servers.pop(job_id, None)
-                self._commands.pop(job_id, None)
                 event = self._events.setdefault(job_id, threading.Event())
 
         if retry_process is not None:
-            # 워처를 먼저 붙인 뒤 훅을 부른다 — 훅(원장 기록)이 I/O 오류로 예외를
-            # 던져도 재시도 프로세스가 무감시로 남지 않는다.
             self._start_watcher(job_id, retry_process)
-            if self._on_retry is not None:
-                with contextlib.suppress(Exception):
-                    self._on_retry(record)
             return
 
         if server is not None:
-            server.close()  # 서버 수명 = job 수명, 모든 종결 경로에서 보장 (§10.1)
+            with contextlib.suppress(Exception):
+                server.close()  # 서버 수명 = job 수명 (§10.1)
         if event is not None:
             event.set()
 
         if self._on_complete is not None:
-            self._on_complete(record, result)
+            # 원장·세션 I/O 오류가 감시 스레드를 죽이거나, 이미 완료된 job에
+            # 엉뚱한 오류를 표면화하면 안 된다 (_on_retry와 동일한 취급).
+            with contextlib.suppress(Exception):
+                self._on_complete(record, result)
 
     @staticmethod
     def _is_retryable(exc: AgyError) -> bool:
@@ -431,17 +491,22 @@ class JobRegistry:
     def get(self, job_id: str) -> JobRecord:
         """현재 상태를 반환한다. 재시작으로 고아가 된 running job은 회수를 시도한다."""
         with self._lock:
-            record = self._records.get(job_id) or self._load_from_disk(job_id)
+            cached = self._records.get(job_id)
+            watched = job_id in self._watched
+            # 이 프로세스가 감시 중인 job만 메모리가 최신이다. 그 밖에는 디스크가
+            # 권위 — 캐시된 레코드는 항상 truthy라 `cached or _load_from_disk()`가
+            # 디스크를 영영 다시 읽지 않아, 재시도로 바뀐 pid를 놓치고 남의 job을
+            # 죽은 pid 기준으로 오종결했다.
+            record = cached if watched else (self._load_from_disk(job_id) or cached)
             if record is None:
                 raise UnknownJob(job_id)
             self._records[job_id] = record
-            orphan = (
-                record.state == "running" and job_id not in self._watched
-            )
+            orphan = record.state == "running" and not watched
             pid = record.pid
+            starttime = record.pid_starttime
 
         if orphan:
-            if pid is not None and _pid_alive(pid):
+            if _is_our_process(pid, starttime):
                 return record  # 이전 서버가 띄운 프로세스가 아직 실행 중
             # 프로세스는 끝났는데 종결자가 없었다 → 출력 파일로 종결 (returncode 미상)
             self._finalize(job_id, returncode=None, timed_out=False)
@@ -479,6 +544,32 @@ class JobRegistry:
 
     # ── 취소 ─────────────────────────────────────────────
 
+    def shutdown(self) -> list[str]:
+        """브리지 종료 시 정리 (§10.1). 서빙 자료에 의존하는 job은 중단시킨다.
+
+        루프백 서버는 이 프로세스와 함께 죽는데 agy는 분리 실행이라 계속 돈다.
+        그대로 두면 검증자가 자료를 하나도 못 읽은 채 낸 답이 다음 기동 때
+        completed로 회수된다 — §2.3-A가 막으려는 침묵 성공 그대로다.
+        인라이닝만 쓴 job은 프롬프트에 자료가 이미 들어 있으므로 계속 두어
+        재시작 생존(§5)을 유지한다.
+        """
+        with self._lock:
+            served_jobs = list(self._servers)
+        stopped = []
+        for job_id in served_jobs:
+            with contextlib.suppress(Exception):
+                record = self.cancel(job_id)
+                if record.state == "cancelled":
+                    record.error = (
+                        "브리지가 종료되어 서빙 자료(루프백 URL)가 끊겼다. "
+                        "검증자가 자료를 읽지 못한 답을 내지 않도록 중단했다 "
+                        "(§10.1). 브리지 재기동 후 다시 요청하라."
+                    )
+                    with contextlib.suppress(Exception), self._job_lock(job_id):
+                        self._persist(record)
+                stopped.append(job_id)
+        return stopped
+
     def cancel(self, job_id: str) -> JobRecord:
         record = self.get(job_id)
         if record.state in TERMINAL_STATES:
@@ -494,7 +585,9 @@ class JobRegistry:
             if record.state in TERMINAL_STATES:
                 return record
             event = self._events.setdefault(job_id, threading.Event())
-            pid = record.pid
+            # 우리 자식임이 확인될 때만 신호를 보낸다 — 재부팅을 넘긴 레코드의
+            # pid는 재할당됐을 수 있고, 그러면 무관한 프로세스 그룹을 죽인다.
+            pid = record.pid if _is_our_process(record.pid, record.pid_starttime) else None
             # 프로세스를 죽이기 전에 먼저 cancelled를 (같은 per-job 락 아래) 디스크에
             # 영속화한다 — 소유 프로세스의 _finalize가 디스크를 재로드해 이 상태를
             # 존중하므로, 프로세스 사망을 failed·retry로 오인해 덮어쓰지 않는다.
@@ -502,17 +595,20 @@ class JobRegistry:
             record.error = "사용자 요청으로 중단됨 (agy_cancel)."
             record.finished_at = time.time()
             record.pid = None
+            record.pid_starttime = None
+            self._watched.discard(job_id)
+            self._commands.pop(job_id, None)
+            server = self._servers.pop(job_id, None)
+            if server is not None:
+                # 종결 공개 전에 닫는다 (§10.1) — _finalize와 동일한 순서
+                with contextlib.suppress(Exception):
+                    server.close()
             self._records[job_id] = record
             self._persist(record)
-            self._watched.discard(job_id)
-            server = self._servers.pop(job_id, None)
-            self._commands.pop(job_id, None)
-        if server is not None:
-            server.close()  # §10.1 — 취소 경로에서도 서버를 남기지 않는다
         event.set()
-        if self._on_complete is not None:
-            self._on_complete(record, None)
 
+        # 종료 신호가 먼저다 — 훅(원장·세션 I/O)이 예외를 던지면 pid는 이미
+        # null로 영속화돼 있어 누구도 이 프로세스에 다시 도달할 수 없다.
         if pid is not None:
             self._kill_group(pid, signal.SIGTERM)
             deadline = time.time() + 5
@@ -520,6 +616,10 @@ class JobRegistry:
                 time.sleep(0.1)
             if _pid_alive(pid):
                 self._kill_group(pid, signal.SIGKILL)
+
+        if self._on_complete is not None:
+            with contextlib.suppress(Exception):
+                self._on_complete(record, None)
         return record
 
 
@@ -531,3 +631,30 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _pid_starttime(pid: int) -> int | None:
+    """/proc/<pid>/stat의 starttime(22번 필드). pid 재사용 판별용 — 재부팅을 넘겨
+    살아남은 레코드의 pid는 다른 프로세스에 재할당됐을 수 있다."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        # comm 필드에 공백·괄호가 들어갈 수 있으므로 마지막 ')' 뒤부터 자른다
+        tail = stat[stat.rindex(")") + 2 :].split()
+        return int(tail[19])
+    except (ValueError, IndexError):
+        return None
+
+
+def _is_our_process(pid: int | None, starttime: int | None) -> bool:
+    """기록해 둔 시작 시각과 일치할 때만 우리 자식으로 인정한다. 시작 시각을
+    모르는 옛 레코드는 생존 여부만으로 판정한다(하위 호환)."""
+    if pid is None:
+        return False
+    if not _pid_alive(pid):
+        return False
+    if starttime is None:
+        return True
+    return _pid_starttime(pid) == starttime

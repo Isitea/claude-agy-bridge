@@ -105,7 +105,14 @@ def playbook_names_for_mode(
 def discover_overlays(project_root: Path, overlay_dir: str) -> list[tuple[str, str]]:
     """오버레이 (파일명, 내용) 목록 (§8.6). 파일명 순 정렬로 결정론을 유지한다.
     `_` 접두 파일(_TEMPLATE.md 등)은 작성 지침용이므로 주입하지 않는다."""
-    directory = project_root / overlay_dir
+    # 설정에서 온 overlay_dir은 신뢰 입력이 아니다. 절대경로나 ../ 를 주면
+    # 저장소 밖 *.md가 모든 프롬프트에 실려 외부 모델로 나간다 — files 인자와
+    # 같은 위협 모델이므로 같은 봉쇄를 적용한다 (§10). load_config가 먼저
+    # 거르지만, 여기서도 방어해 다른 호출 경로를 막는다.
+    root = project_root.resolve()
+    directory = (project_root / overlay_dir).resolve()
+    if not directory.is_relative_to(root):
+        return []
     if not directory.is_dir():
         return []
     return [

@@ -160,5 +160,26 @@ def load_config(cwd: Path | None = None) -> Config:
         playbooks_enabled=(
             tuple(playbooks["enabled"]) if "enabled" in playbooks else None
         ),
-        overlay_dir=playbooks.get("overlay_dir", ".agy-bridge/playbooks"),
+        overlay_dir=_validated_overlay_dir(
+            playbooks.get("overlay_dir", ".agy-bridge/playbooks"), root
+        ),
     )
+
+
+def _validated_overlay_dir(overlay_dir: str, root: Path) -> str:
+    """오버레이 디렉터리는 저장소 안이어야 한다 (§10).
+
+    이 값은 대상 저장소의 설정 파일에서 오고, 여기 담긴 *.md는 전부 프롬프트에
+    실려 외부 모델로 나간다. 절대경로나 ../ 를 허용하면 files 인자에 넣어 둔
+    봉쇄를 우회하는 두 번째 유출 경로가 된다.
+    """
+    if not isinstance(overlay_dir, str):
+        raise StartupError(f"[playbooks] overlay_dir은 문자열이어야 한다: {overlay_dir!r}")
+    resolved = (root / overlay_dir).resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise StartupError(
+            f"[playbooks] overlay_dir이 프로젝트 루트({root}) 밖을 가리킨다: "
+            f"{overlay_dir!r}. 오버레이 내용은 전부 검증자에게 전송되므로 "
+            "저장소 안쪽 상대 경로만 허용한다 (§10)."
+        )
+    return overlay_dir

@@ -59,3 +59,47 @@ def verdict_schema_json() -> str:
 def structured_default(mode: str) -> bool:
     """mode=verify는 기본으로 구조화 판정을 요구한다 (§4.2)."""
     return mode == "verify"
+
+
+def validate_verdict(value: object) -> list[str]:
+    """VERDICT_SCHEMA 위반 목록을 반환한다 (빈 목록이면 적합).
+
+    agy의 --json-schema 강제는 프롬프트 수준이라 무시될 수 있다(§4.4 실측).
+    검증 없이 통과시키면 열거형 밖 판정이나 필수 키가 빠진 객체가 그대로
+    verdict로 실려, 소비 세션이 판정 부재를 통과로 오독한다. 외부 의존성을
+    늘리지 않으려고(§7.1) 이 스키마에 필요한 만큼만 검사한다.
+    """
+    problems: list[str] = []
+    if not isinstance(value, dict):
+        return [f"판정이 JSON 객체가 아니다 ({type(value).__name__})"]
+
+    for key in VERDICT_SCHEMA["required"]:
+        if key not in value:
+            problems.append(f"필수 키 누락: {key}")
+
+    props: dict = VERDICT_SCHEMA["properties"]
+    for key in ("verdict", "confidence"):
+        allowed = props[key]["enum"]
+        if key in value and value[key] not in allowed:
+            problems.append(f"{key}={value[key]!r}는 허용값 {allowed} 밖이다")
+    if "summary" in value and not isinstance(value["summary"], str):
+        problems.append("summary가 문자열이 아니다")
+
+    issues = value.get("issues")
+    if "issues" in value and not isinstance(issues, list):
+        problems.append("issues가 배열이 아니다")
+    elif isinstance(issues, list):
+        item_schema = props["issues"]["items"]
+        severities = item_schema["properties"]["severity"]["enum"]
+        for index, issue in enumerate(issues):
+            if not isinstance(issue, dict):
+                problems.append(f"issues[{index}]가 객체가 아니다")
+                continue
+            missing = [k for k in item_schema["required"] if k not in issue]
+            if missing:
+                problems.append(f"issues[{index}] 필수 키 누락: {', '.join(missing)}")
+            if "severity" in issue and issue["severity"] not in severities:
+                problems.append(
+                    f"issues[{index}].severity={issue['severity']!r}가 허용값 밖이다"
+                )
+    return problems
