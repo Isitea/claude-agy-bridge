@@ -56,3 +56,37 @@ def test_corrupt_file_is_quarantined(bridge_config):
     (config.state_dir / "sessions.json").write_text("{{{ not json")
     assert store.list_sessions() == {}
     assert (config.state_dir / "sessions.json.corrupt").exists()
+
+
+def test_concurrent_stores_do_not_lose_updates(bridge_config):
+    """리뷰 #4: 같은 상태 디렉터리를 보는 두 스토어(다중 브리지 프로세스 모사)가
+    병렬로 갱신해도 lost update·tmp 충돌 크래시가 없어야 한다 (flock)."""
+    import threading
+
+    config = bridge_config()
+    store_a, store_b = SessionStore(config), SessionStore(config)
+    errors: list[Exception] = []
+
+    def hammer(store: SessionStore, session_id: str) -> None:
+        try:
+            for _ in range(25):
+                store.record_use(
+                    session_id, conversation_id=f"conv-{session_id}",
+                    mode="review", usage={"total_tokens": 1},
+                )
+        except Exception as exc:  # noqa: BLE001 — 실패 원인 그대로 표면화
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=hammer, args=(store_a, "sess-a")),
+        threading.Thread(target=hammer, args=(store_b, "sess-b")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    sessions = store_a.list_sessions()
+    assert sessions["sess-a"]["turns"] == 25
+    assert sessions["sess-b"]["turns"] == 25

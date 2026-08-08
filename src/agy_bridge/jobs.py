@@ -111,15 +111,49 @@ class JobRegistry:
         path = self._record_path(job_id)
         if not path.is_file():
             return None
-        return JobRecord(**json.loads(path.read_text(encoding="utf-8")))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            # 다른 프로세스가 선점만 하고 아직 _persist하지 않은 빈 파일 —
+            # 그 프로세스만 의미를 아는 상태이므로 여기서는 없는 것으로 본다.
+            return None
+        return JobRecord(**data)
 
     def _next_job_id(self) -> str:
+        """O_CREAT|O_EXCL로 레코드 파일을 선점해 id를 원자적으로 배정한다.
+        같은 상태 디렉터리를 공유하는 다른 브리지 프로세스(같은 저장소의 다중
+        세션)와의 충돌은 이 선점이, 스레드 간 충돌은 _lock이 막는다. 선점된
+        빈 파일은 곧 _persist가 채우며, 그 사이 다른 프로세스의 읽기는
+        _load_from_disk가 None으로 처리한다."""
         highest = 0
         for entry in self._jobs_dir.iterdir():
             match = _JOB_FILE_RE.match(entry.name)
             if match:
                 highest = max(highest, int(match.group(1)))
-        return f"j-{highest + 1}"
+        candidate = highest + 1
+        while True:
+            path = self._record_path(f"j-{candidate}")
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                candidate += 1
+                continue
+            os.close(fd)
+            return f"j-{candidate}"
+
+    def claim_job_id(self) -> str:
+        """스폰 전에 id가 필요한 호출자(원장 선기록 §13)를 위한 사전 선점."""
+        with self._lock:
+            return self._next_job_id()
+
+    def release_claim(self, job_id: str) -> None:
+        """선점만 되고 레코드가 영속화되지 않은 id를 반납한다.
+        빈 파일일 때만 지운다 — 실제 레코드는 건드리지 않는다."""
+        with self._lock:
+            path = self._record_path(job_id)
+            with contextlib.suppress(FileNotFoundError):
+                if path.stat().st_size == 0:
+                    path.unlink()
 
     # ── 시작 ─────────────────────────────────────────────
 
@@ -139,6 +173,7 @@ class JobRegistry:
         strategy: str = "inline",
         strategy_reason: str | None = None,
         context_server=None,  # ContextServer — 서버 수명 = job 수명 (§10.1)
+        job_id: str | None = None,  # claim_job_id()로 미리 선점한 id (§13)
     ) -> JobRecord:
         ensure_prompt_within_argv_limit(prompt)
         cmd = build_command(
@@ -150,9 +185,11 @@ class JobRegistry:
             json_schema=json_schema,
         )
 
+        claimed_here = job_id is None
         try:
             with self._lock:
-                job_id = self._next_job_id()
+                if job_id is None:
+                    job_id = self._next_job_id()
                 process = self._spawn(job_id, cmd)
                 record = JobRecord(
                     job_id=job_id,
@@ -175,7 +212,10 @@ class JobRegistry:
                     self._servers[job_id] = context_server
                 self._persist(record)
         except Exception:
-            # 스폰 실패 시에도 서버를 유휴 상태로 남기지 않는다 (§10.1)
+            # 스폰 실패 시에도 서버를 유휴 상태로 남기지 않는다 (§10.1).
+            # 여기서 선점한 id는 반납한다 — 밖에서 선점한 id는 호출자 몫이다.
+            if claimed_here and job_id is not None:
+                self.release_claim(job_id)
             if context_server is not None:
                 context_server.close()
             raise

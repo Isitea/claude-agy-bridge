@@ -140,3 +140,50 @@ def test_job_ids_are_monotonic_across_restarts(bridge_config, fake_agy):
     second = JobRegistry(config)
     r2 = _start(second)
     assert int(r2.job_id.split("-")[1]) > int(r1.job_id.split("-")[1])
+
+
+def test_job_ids_unique_across_concurrent_registries(bridge_config, fake_agy):
+    """리뷰 #4: 같은 jobs/를 공유하는 두 레지스트리(다중 브리지 프로세스 모사)가
+    동시에 배정해도 같은 id가 나오면 안 된다 — O_EXCL 선점이 경합을 판정한다."""
+    import threading
+
+    config = bridge_config(fake_agy(PAYLOAD))
+    registries = [JobRegistry(config), JobRegistry(config)]
+    barrier = threading.Barrier(2)
+    claimed: list[str] = []
+
+    def claim(registry: JobRegistry) -> None:
+        barrier.wait()  # 두 스캔을 최대한 동시에 강제
+        claimed.append(registry.claim_job_id())
+
+    threads = [threading.Thread(target=claim, args=(r,)) for r in registries]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(set(claimed)) == 2, claimed
+
+
+def test_empty_claim_file_does_not_break_readers(bridge_config, fake_agy):
+    """리뷰 #4: 다른 프로세스의 선점 창(빈 j-N.json)이 이쪽의 get/list_jobs를
+    JSONDecodeError로 통째로 죽이면 안 된다."""
+    from agy_bridge.jobs import UnknownJob
+
+    config = bridge_config(fake_agy(PAYLOAD))
+    registry = JobRegistry(config)
+    record = _start(registry)
+    _wait_terminal(registry, record.job_id)
+
+    (config.state_dir / "jobs" / "j-99.json").touch()  # 다른 프로세스의 선점 모사
+    assert [r.job_id for r in registry.list_jobs()] == [record.job_id]
+    with pytest.raises(UnknownJob):
+        registry.get("j-99")
+
+
+def test_spawn_failure_releases_claim(bridge_config):
+    """스폰 실패가 빈 선점 파일을 남기면 list_jobs가 영구 고장난다 — 반납 확인."""
+    registry = JobRegistry(bridge_config("/nonexistent/agy"))
+    with pytest.raises(OSError):
+        registry.start("p", mode="review", question="q")
+    assert registry.list_jobs() == []
+    assert registry.claim_job_id() == "j-1"  # 반납된 id가 재사용된다

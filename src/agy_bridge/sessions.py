@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import threading
 import time
@@ -19,6 +21,20 @@ class SessionStore:
     def __init__(self, config: Config):
         self._path: Path = config.state_dir / "sessions.json"
         self._lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def _exclusive(self):
+        """read-modify-write 전 구간을 스레드 락 + fcntl.flock으로 감싼다.
+        상태 디렉터리는 같은 저장소의 브리지 프로세스들이 공유하므로(§7.4),
+        프로세스 내부 락만으로는 서로의 갱신을 덮어쓴다 (lost update, 리뷰 #4).
+        conversation_id가 유실되면 세션 연속성(캐시 히트)이 끊어진다."""
+        lock_path = self._path.with_suffix(".lock")
+        with self._lock, open(lock_path, "w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load(self) -> dict:
         if not self._path.is_file():
@@ -39,7 +55,7 @@ class SessionStore:
 
     def resolve(self, session_id: str) -> dict | None:
         """세션 메타를 반환한다. 없으면 None (호출자가 새 세션으로 시작)."""
-        with self._lock:
+        with self._exclusive():
             return self._load().get(session_id)
 
     def record_use(
@@ -53,7 +69,7 @@ class SessionStore:
         """호출 완료 시 매핑을 갱신한다. 처음 보는 session_id면 생성한다."""
         now = time.time()
         tokens = int((usage or {}).get("total_tokens") or 0)
-        with self._lock:
+        with self._exclusive():
             sessions = self._load()
             meta = sessions.get(session_id) or {
                 "conversation_id": conversation_id,
@@ -71,12 +87,12 @@ class SessionStore:
             self._save(sessions)
 
     def list_sessions(self) -> dict:
-        with self._lock:
+        with self._exclusive():
             return self._load()
 
     def close(self, session_id: str) -> bool:
         """매핑을 제거한다. agy 쪽 conversation은 남지만 더는 재개되지 않는다."""
-        with self._lock:
+        with self._exclusive():
             sessions = self._load()
             if session_id not in sessions:
                 return False
