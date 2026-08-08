@@ -106,12 +106,48 @@ def test_multibyte_bytes_budget_enforced(tmp_path):
         _inline(["ko.md"], tmp_path)
 
 
-def test_absolute_path_outside_root_displays_absolute(tmp_path):
-    outside = tmp_path / "elsewhere"
-    outside.mkdir()
-    target = outside / "ref.py"
-    target.write_text("data\n")
-    root = tmp_path / "repo"
-    root.mkdir()
-    _text, manifest = _inline([str(target)], root)
-    assert manifest[0]["file"] == target.as_posix()
+class TestProjectRootConfinement:
+    """리뷰 #3 (§10): files 인자는 프롬프트 인젝션으로 유도될 수 있는 입력이다.
+    deny_globs는 자격증명 이름만 거르므로, 루트 밖 접근 자체를 봉쇄해야
+    ~/.ssh/id_rsa 같은 (deny에 안 걸리는) 파일의 유출 경로가 닫힌다."""
+
+    def _repo_and_secret(self, tmp_path):
+        root = tmp_path / "repo"
+        root.mkdir()
+        secret = tmp_path / "id_rsa"
+        secret.write_text("PRIVATE KEY\n")
+        return root, secret
+
+    def test_absolute_path_outside_root_is_rejected(self, tmp_path):
+        root, secret = self._repo_and_secret(tmp_path)
+        with pytest.raises(ContextError, match="밖의 파일"):
+            _inline([str(secret)], root)
+
+    def test_relative_escape_is_rejected(self, tmp_path):
+        root, _secret = self._repo_and_secret(tmp_path)
+        with pytest.raises(ContextError, match="밖의 파일"):
+            _inline(["../id_rsa"], root)
+
+    def test_symlink_escape_is_rejected(self, tmp_path):
+        """저장소 안의 무해해 보이는 심링크가 밖을 가리키는 벡터 — resolve 후
+        비교이므로 막혀야 한다."""
+        root, secret = self._repo_and_secret(tmp_path)
+        (root / "innocent.txt").symlink_to(secret)
+        with pytest.raises(ContextError, match="밖의 파일"):
+            _inline(["innocent.txt"], root)
+
+    def test_confinement_error_does_not_reveal_existence(self, tmp_path):
+        """루트 밖 경로는 존재하지 않아도 같은 오류 — 존재 오라클을 주지 않는다."""
+        root, _secret = self._repo_and_secret(tmp_path)
+        with pytest.raises(ContextError, match="밖의 파일"):
+            _inline(["/no/such/file/anywhere"], root)
+
+    def test_symlinked_project_root_still_accepts_inside_files(self, tmp_path):
+        """루트 자체가 심링크여도 내부 파일은 정상 동작해야 한다 (resolve 비교)."""
+        real = tmp_path / "real-repo"
+        real.mkdir()
+        (real / "a.py").write_text("data\n")
+        link = tmp_path / "link-repo"
+        link.symlink_to(real)
+        _text, manifest = _inline(["a.py"], link)
+        assert manifest[0]["file"] == "a.py"

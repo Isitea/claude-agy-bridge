@@ -79,6 +79,20 @@ def _render_spec(
     path = Path(raw_path)
     abs_path = (path if path.is_absolute() else project_root / path).resolve()
 
+    # project_root 봉쇄 (§10, 리뷰 #3): 호출 인자는 프롬프트 인젝션으로 유도될
+    # 수 있는 입력이다. 절대경로·../ 탈출·심링크(resolve 후 비교이므로) 모두
+    # 여기서 막는다. 존재 확인보다 먼저 — 루트 밖 파일의 존재 여부조차 답하지
+    # 않는다. deny_globs는 루트 안쪽의 자격증명을 거르는 두 번째 방어선이다.
+    root = project_root.resolve()
+    try:
+        display = abs_path.relative_to(root).as_posix()
+    except ValueError:
+        raise ContextError(
+            f"{spec}: project_root({project_root}) 밖의 파일은 전달하지 않는다 "
+            "(§10 유출 방지). 저장소 밖 자료가 필요하면 저장소 안으로 복사한 뒤 "
+            "지정하라."
+        ) from None
+
     if _is_denied(abs_path, deny_globs):
         raise ContextError(
             f"{spec}: deny_globs에 걸려 전달을 거부한다 (§10 자격증명 보호). "
@@ -105,11 +119,6 @@ def _render_spec(
         f"{number:>{width}}| {line}"
         for number, line in enumerate(selected, start=start)
     )
-
-    try:
-        display = abs_path.relative_to(project_root).as_posix()
-    except ValueError:
-        display = abs_path.as_posix()
 
     block = (
         f"--- FILE {display} [{start}-{end}행 / 총 {total_lines}행] ---\n{numbered}"
