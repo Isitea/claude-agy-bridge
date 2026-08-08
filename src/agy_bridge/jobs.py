@@ -20,6 +20,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from agy_bridge.config import Config
 from agy_bridge.runner import (
@@ -31,6 +32,13 @@ from agy_bridge.runner import (
 )
 
 TERMINAL_STATES = ("completed", "failed", "timeout", "cancelled")
+
+
+class _SupportsClose(Protocol):
+    """ContextServer의 수명 연동에 필요한 최소 표면 (§10.1) — serve.py를
+    직접 import하지 않아 모듈 결합을 피한다."""
+
+    def close(self) -> None: ...
 
 _JOB_FILE_RE = re.compile(r"^j-(\d+)\.json$")
 
@@ -84,7 +92,7 @@ class JobRegistry:
         self._watched: set[str] = set()
         self._on_complete = on_complete
         self._on_retry = on_retry
-        self._servers: dict[str, object] = {}   # job_id → ContextServer (수명 연동 §10.1)
+        self._servers: dict[str, _SupportsClose] = {}  # job_id → ContextServer (§10.1)
         self._commands: dict[str, list[str]] = {}  # job_id → argv (재시도용, 메모리 전용)
 
     # ── 경로 ─────────────────────────────────────────────
@@ -174,7 +182,7 @@ class JobRegistry:
         served: list | None = None,
         strategy: str = "inline",
         strategy_reason: str | None = None,
-        context_server=None,  # ContextServer — 서버 수명 = job 수명 (§10.1)
+        context_server: _SupportsClose | None = None,  # 서버 수명 = job 수명 (§10.1)
         job_id: str | None = None,  # claim_job_id()로 미리 선점한 id (§13)
     ) -> JobRecord:
         ensure_prompt_within_argv_limit(prompt)
@@ -263,7 +271,11 @@ class JobRegistry:
         stdout = self._read_output(self._stdout_path(job_id))
         stderr = self._read_output(self._stderr_path(job_id))
 
+        # 락 블록 밖에서 읽는 값들 — 조기 return 경로에서도 정의되도록 선대입
+        # (리뷰 #8: possibly-unbound, 조기 return 제거 리팩터링에 대한 보험)
         retry_process: subprocess.Popen | None = None
+        server: _SupportsClose | None = None
+        event: threading.Event | None = None
         with self._lock:
             record = self._records.get(job_id) or self._load_from_disk(job_id)
             if record is None or record.state in TERMINAL_STATES:
@@ -317,7 +329,8 @@ class JobRegistry:
 
         if server is not None:
             server.close()  # 서버 수명 = job 수명, 모든 종결 경로에서 보장 (§10.1)
-        event.set()
+        if event is not None:
+            event.set()
 
         if self._on_complete is not None:
             self._on_complete(record, result)
