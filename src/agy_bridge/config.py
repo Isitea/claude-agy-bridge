@@ -7,7 +7,9 @@ agy 바이너리는 기동 시점에 찾지 못하면 즉시 실패한다 — �
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import json
 import os
 import shutil
 import tomllib
@@ -115,6 +117,40 @@ def state_dir_for(project_root: Path) -> Path:
     return _cache_root() / digest
 
 
+STATE_META_FILENAME = "meta.json"
+
+
+def write_state_meta(state_dir: Path, project_root: Path) -> None:
+    """상태 디렉터리에 어느 프로젝트 것인지 남긴다.
+
+    디렉터리 이름은 경로의 sha256이라 역산이 안 된다. 이 표식이 없으면
+    `agy-bridge purge`가 무엇을 지우는지 보여줄 수 없고, 사용자는 캐시에 쌓인
+    해시 디렉터리들의 정체를 영영 알 수 없다.
+    """
+    meta_path = state_dir / STATE_META_FILENAME
+    payload = {"project_root": str(project_root), "version": 1}
+    with contextlib.suppress(OSError):
+        if meta_path.is_file():
+            existing = json.loads(meta_path.read_text(encoding="utf-8"))
+            if existing.get("project_root") == payload["project_root"]:
+                return
+    with contextlib.suppress(OSError):
+        tmp = meta_path.with_suffix(f".json.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(meta_path)
+
+
+def read_state_meta(state_dir: Path) -> dict:
+    """write_state_meta가 남긴 표식. 없거나 손상이면 빈 dict."""
+    try:
+        data = json.loads(
+            (state_dir / STATE_META_FILENAME).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def load_config(cwd: Path | None = None) -> Config:
     root = find_project_root(cwd)
 
@@ -147,6 +183,7 @@ def load_config(cwd: Path | None = None) -> Config:
     scratch_dir = state_dir / "scratch"
     for directory in (state_dir, scratch_dir, state_dir / "jobs"):
         directory.mkdir(parents=True, exist_ok=True)
+    write_state_meta(state_dir, root)
 
     return Config(
         project_root=root,

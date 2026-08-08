@@ -10,6 +10,7 @@ agy 권한 설정을 만들지 않으며, `--dangerously-skip-permissions`는 �
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -115,6 +116,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="묻지 않고 CLAUDE.md에 사용 지침 스니펫을 반영",
     )
 
+    p_deinit = sub.add_parser(
+        "deinit", help="대상 저장소에서 브리지 등록을 해제 (init의 역연산)"
+    )
+    p_deinit.add_argument(
+        "--target", help="대상 저장소 경로 (생략 시 현재 디렉터리의 git 루트)"
+    )
+    p_deinit.add_argument(
+        "--purge-config",
+        action="store_true",
+        help=".agy-bridge.toml과 오버레이까지 삭제 (기본은 보존)",
+    )
+    p_deinit.add_argument(
+        "--yes", action="store_true", help="확인 없이 실제로 삭제 (기본은 미리보기)"
+    )
+
+    p_purge = sub.add_parser(
+        "purge", help="런타임 상태(job·세션·원장) 삭제 — 저장소 파일은 손대지 않는다"
+    )
+    p_purge.add_argument(
+        "--all", action="store_true", help="이 머신의 모든 프로젝트 상태를 대상으로"
+    )
+    p_purge.add_argument(
+        "--yes", action="store_true", help="확인 없이 실제로 삭제 (기본은 미리보기)"
+    )
+
     sub.add_parser(
         "update", help="설치된 브리지를 최신으로 갱신 (uv tool upgrade 위임)"
     )
@@ -141,6 +167,10 @@ def main(argv: list[str] | None = None) -> int:
         return _budget()
     if args.command == "init":
         return _init(args)
+    if args.command == "deinit":
+        return _deinit(args)
+    if args.command == "purge":
+        return _purge(args)
     if args.command == "doctor":
         return _doctor(args)
     if args.command == "update":
@@ -291,6 +321,229 @@ def _init(args) -> int:
         print("[6/6] CLAUDE.md 미변경 — 아래 스니펫 추가를 검토하라:\n")
         print(CLAUDE_MD_SNIPPET)
     return 0
+
+
+# ── deinit / purge ──────────────────────────────────────
+#
+# 제거의 원칙 (설치의 대칭):
+#   1. 우리가 만든 것만, 만들었을 때만 지운다. 저장소·소스·사용자 저작물은
+#      어떤 경로로도 rm -rf 하지 않는다.
+#   2. 전제 도구(uv·agy)는 우리가 설치하지 않았으므로 제거도 하지 않는다.
+#   3. 기본은 미리보기다. --yes가 있어야 실제로 지운다.
+#   4. 브리지 소스 체크아웃에서는 거부한다 — 로컬 테스트 환경을 지키기 위해서다.
+
+
+def _is_bridge_checkout(target: Path) -> bool:
+    """대상이 브리지 자신의 소스 저장소인가. 여기서 deinit을 돌리면 개발·테스트
+    환경이 망가지므로 막는다."""
+    pyproject = target / "pyproject.toml"
+    if not pyproject.is_file():
+        return False
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return 'name = "agy-bridge"' in text
+
+
+def _resolve_target(args) -> Path | None:
+    from agy_bridge.config import find_project_root
+
+    if args.target:
+        target = Path(args.target).expanduser().resolve()
+    else:
+        target = find_project_root()
+        print(f"대상: {target} (자동 판정 — 다른 곳이면 --target 지정)")
+    if not target.is_dir():
+        print(f"agy-bridge: 대상이 디렉터리가 아니다: {target}", file=sys.stderr)
+        return None
+    return target
+
+
+def _deinit(args) -> int:
+    """init이 만든 것을 되돌린다. 설정·오버레이는 사용자 저작물이라 기본 보존."""
+    target = _resolve_target(args)
+    if target is None:
+        return 1
+    if _is_bridge_checkout(target):
+        print(
+            f"agy-bridge deinit: {target}는 브리지 소스 저장소다 — 거부한다.\n"
+            "  여기서 실행하면 개발·테스트 환경이 망가진다. 대상 저장소에서 "
+            "실행하거나 --target으로 지정하라.",
+            file=sys.stderr,
+        )
+        return 1
+
+    planned: list[str] = []
+
+    # 1) .mcp.json의 agy 항목만 제거 — 다른 서버는 보존, 파일도 남긴다
+    mcp_path = target / ".mcp.json"
+    mcp_data: dict = {}
+    remove_agy_entry = False
+    if mcp_path.is_file():
+        try:
+            mcp_data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            print(
+                f"agy-bridge deinit: {mcp_path} 파싱 실패 — 손대지 않는다: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        if "agy" in (mcp_data.get("mcpServers") or {}):
+            remove_agy_entry = True
+            planned.append(f"{mcp_path}: mcpServers.agy 항목 제거")
+
+    # 2) CLAUDE.md의 우리 절만 제거 — 파일 자체는 지우지 않는다
+    claude_md = target / "CLAUDE.md"
+    remove_snippet = claude_md.is_file() and _SNIPPET_HEADER in claude_md.read_text(
+        encoding="utf-8"
+    )
+    if remove_snippet:
+        planned.append(f"{claude_md}: '{_SNIPPET_HEADER}' 절 제거")
+
+    # 3) init이 만든 템플릿만 제거 (사용자가 쓴 오버레이는 남긴다)
+    overlay_dir = target / ".agy-bridge" / "playbooks"
+    template = overlay_dir / "_TEMPLATE.md"
+    if template.is_file():
+        planned.append(f"{template} 삭제 (init이 만든 템플릿)")
+
+    # 4) --purge-config일 때만 설정·오버레이까지
+    config_path = target / ".agy-bridge.toml"
+    extra: list[Path] = []
+    if args.purge_config:
+        if config_path.is_file():
+            extra.append(config_path)
+            planned.append(f"{config_path} 삭제 (--purge-config)")
+        overlays = sorted(overlay_dir.glob("*.md")) if overlay_dir.is_dir() else []
+        for path in overlays:
+            if path.name != "_TEMPLATE.md":
+                extra.append(path)
+                planned.append(f"{path} 삭제 (--purge-config, 사용자 오버레이)")
+    else:
+        kept = []
+        if config_path.is_file():
+            kept.append(config_path.name)
+        if overlay_dir.is_dir():
+            kept += [
+                p.name for p in sorted(overlay_dir.glob("*.md"))
+                if p.name != "_TEMPLATE.md"
+            ]
+        if kept:
+            print(f"보존: {', '.join(kept)} (지우려면 --purge-config)")
+
+    if not planned:
+        print("제거할 항목이 없다 — 이 저장소에는 브리지 등록이 없다.")
+        return 0
+
+    print("\n제거 대상:")
+    for line in planned:
+        print(f"  - {line}")
+    if not args.yes:
+        print("\n미리보기다. 실제로 지우려면 --yes를 붙여라.")
+        return 0
+
+    if remove_agy_entry:
+        del mcp_data["mcpServers"]["agy"]
+        mcp_path.write_text(
+            json.dumps(mcp_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    if remove_snippet:
+        import re
+
+        text = claude_md.read_text(encoding="utf-8")
+        pattern = re.compile(
+            rf"{re.escape(_SNIPPET_HEADER)}.*?(?=^## |\Z)", re.DOTALL | re.MULTILINE
+        )
+        remaining = pattern.sub("", text).strip()
+        if remaining:
+            claude_md.write_text(remaining + "\n", encoding="utf-8")
+        else:
+            # 우리 절만 있던 파일 = init이 만든 파일. 빈 껍데기를 남기지 않는다.
+            claude_md.unlink()
+            print(f"  ({claude_md.name}은 우리 절만 있어 파일째 정리)")
+    if template.is_file():
+        template.unlink()
+    for path in extra:
+        with contextlib.suppress(OSError):
+            path.unlink()
+    # 빈 껍데기 디렉터리만 정리 (내용이 남아 있으면 그대로 둔다)
+    for directory in (overlay_dir, overlay_dir.parent):
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+
+    print("\n완료. 런타임 상태는 `agy-bridge purge`로, 전역 바이너리는 "
+          "`uv tool uninstall agy-bridge`로 각각 제거한다.")
+    return 0
+
+
+def _purge(args) -> int:
+    """런타임 상태(job·세션·원장)를 지운다. 저장소 파일은 건드리지 않는다."""
+    from agy_bridge.config import (
+        _cache_root,
+        find_project_root,
+        read_state_meta,
+        state_dir_for,
+    )
+    from agy_bridge.jobs import TERMINAL_STATES, JobRegistry
+
+    cache_root = _cache_root()
+    if args.all:
+        targets = sorted(p for p in cache_root.glob("*") if p.is_dir())
+        if not targets:
+            print(f"정리할 상태 디렉터리가 없다 ({cache_root}).")
+            return 0
+    else:
+        targets = [state_dir_for(find_project_root())]
+        if not targets[0].is_dir():
+            print("이 프로젝트의 상태 디렉터리가 없다 — 지울 것이 없다.")
+            return 0
+
+    print(f"상태 디렉터리 ({cache_root}):\n")
+    removable: list[Path] = []
+    for state_dir in targets:
+        meta = read_state_meta(state_dir)
+        origin = meta.get("project_root", "(기록 없음 — 옛 버전이 만든 디렉터리)")
+        running = _running_jobs(state_dir, JobRegistry, TERMINAL_STATES)
+        size_kb = sum(
+            f.stat().st_size for f in state_dir.rglob("*") if f.is_file()
+        ) // 1024
+        flag = f"  ★실행 중 job {len(running)}건★" if running else ""
+        print(f"  {state_dir.name}  {size_kb:,} KB  ← {origin}{flag}")
+        if running:
+            print(f"      {', '.join(running)} — 먼저 agy_cancel로 정리하라")
+        else:
+            removable.append(state_dir)
+
+    if not removable:
+        print("\n지울 수 있는 디렉터리가 없다 (실행 중 job이 있는 곳은 건너뛴다).")
+        return 1 if targets else 0
+    if not args.yes:
+        print(f"\n미리보기다. {len(removable)}개를 실제로 지우려면 --yes를 붙여라.")
+        return 0
+
+    import shutil
+
+    for state_dir in removable:
+        shutil.rmtree(state_dir, ignore_errors=True)
+    print(f"\n{len(removable)}개 상태 디렉터리를 삭제했다. "
+          "저장소 파일과 agy·uv는 그대로다.")
+    return 0
+
+
+def _running_jobs(state_dir: Path, registry_cls, terminal_states) -> list[str]:
+    """해당 상태 디렉터리에서 아직 종결되지 않은 job id 목록."""
+    jobs_dir = state_dir / "jobs"
+    if not jobs_dir.is_dir():
+        return []
+    running = []
+    for entry in sorted(jobs_dir.glob("j-*.json")):
+        try:
+            record = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(record, dict) and record.get("state") not in terminal_states:
+            running.append(entry.stem)
+    return running
 
 
 _SNIPPET_HEADER = "## 과학 검증 (agy_consult)"

@@ -65,6 +65,39 @@ agy-bridge doctor    # 바이너리·인증·상태·예산 자가 진단, 조�
 agy-bridge budget    # 오늘의 호출 사용량·잔여 예산 리포트
 ```
 
+## 제거
+
+설치가 3단계였으므로 제거도 3단계다. 각각 독립적이라 필요한 것만 하면 된다.
+
+```bash
+cd /path/to/target-repo
+agy-bridge deinit          # 1) 저장소 등록 해제 (미리보기)
+agy-bridge deinit --yes    #    실제 수행
+
+agy-bridge purge --all     # 2) 런타임 상태(job·세션·원장) — 미리보기
+agy-bridge purge --all --yes
+
+curl -fsSL https://raw.githubusercontent.com/Isitea/claude-agy-bridge/main/uninstall.sh | bash
+#                          # 3) 전역 바이너리 (uv tool uninstall 위임)
+```
+
+원칙은 하나다 — **브리지가 만든 것만 지운다.**
+
+- 저장소·소스 체크아웃·사용자 저작물은 어떤 경로로도 삭제되지 않는다. `deinit`은
+  `.mcp.json`의 `agy` 항목과 `CLAUDE.md`의 해당 절, init이 만든 `_TEMPLATE.md`만
+  되돌리고, `.agy-bridge.toml`과 직접 쓴 오버레이는 **보존한다**(지우려면
+  `--purge-config`). 다른 MCP 서버 항목과 `CLAUDE.md`의 다른 절도 그대로 둔다.
+- `uv`와 `agy`는 우리가 설치하지 않았으므로 제거하지 않는다(설치 정책의 대칭).
+  `uv tool uninstall`은 uv 자신의 venv와 심링크만 지우므로 **로컬 체크아웃은
+  영향받지 않는다** — 개발 중이라면 제거 후에도 `uv run pytest`가 그대로 동작한다.
+- 기본은 미리보기다. `--yes`가 있어야 실제로 지운다.
+- 브리지 소스 저장소에서 `deinit`을 실행하면 거부한다(개발·테스트 환경 보호).
+- `purge`는 실행 중인 job이 있으면 거부한다 — 원장을 지우면 예산 계측이 깨지고
+  분리 실행된 agy가 고아가 된다. 먼저 `agy_cancel`로 정리하라.
+
+상태 디렉터리 이름은 프로젝트 경로의 해시라 눈으로는 알아볼 수 없으므로, `purge`가
+각 디렉터리의 출처 경로와 크기를 함께 보여준다.
+
 ## 제공 도구 (MCP)
 
 | 도구 | 역할 |

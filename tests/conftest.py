@@ -9,6 +9,16 @@ import pytest
 from agy_bridge.config import Config
 
 
+@pytest.fixture(autouse=True)
+def _isolate_state_dir(tmp_path: Path, monkeypatch):
+    """테스트가 실제 ~/.cache/claude-agy-bridge에 상태 디렉터리를 만들지 않게 한다.
+
+    init·doctor 등은 load_config를 부르고, 그러면 프로젝트 경로 해시로 실제
+    캐시에 디렉터리가 생긴다 — 실행할 때마다 해시가 달라 쓰레기가 쌓였다.
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+
+
 @pytest.fixture
 def bridge_config(tmp_path: Path):
     """가짜 agy 바이너리를 주입할 수 있는 테스트용 Config 팩토리."""
