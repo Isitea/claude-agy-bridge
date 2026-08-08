@@ -56,8 +56,10 @@ wait_seconds(기본 45초) 안에 끝나면 결과를 바로 받고, 넘어가�
 files: 검토 대상을 "경로" 또는 "경로:시작-끝" 행범위로 지정한다 (프로젝트 루트 기준).
     프로젝트 루트 밖 경로(절대경로·상위 탈출·심링크)는 거부된다 — 밖의 자료가
     필요하면 저장소 안으로 복사한 뒤 지정하라.
-    **순서가 우선순위다** — 앞에서부터 100,000자 인라이닝 예산에 담고, 넘치는
-    파일부터는 루프백 HTTP 서빙으로 자동 전환된다(auto). 검토 대상을 앞에,
+    **순서가 우선순위다** — 앞에서부터 인라이닝 예산에 담고, 넘치는 파일부터는
+    루프백 HTTP 서빙으로 자동 전환된다(auto). 예산은 문자(기본 100,000자)와
+    바이트(argv 한계 기준, 한글 등 멀티바이트는 약 40,000자에서 먼저 걸릴 수
+    있음)를 병행하며, 플레이북·question 길이도 예산을 잠식한다. 검토 대상을 앞에,
     주변 자료(문헌, 로그, 큰 모듈)를 뒤에 두라. 전환 시 결과에 context_strategy와
     사유가 명시된다. 서빙은 지연이 크기에 비례한다(600 KB ≈ 46 s, 2 MB ≈ 100 s).
 context: 물리 설정, 단위계, 가정, 경계조건 등 코드만으로 알 수 없는 정보.
@@ -240,6 +242,22 @@ def build_server(config: Config) -> MCPServer:
         # 원자적 판정은 스폰 직전의 check_and_record_start가 한다 (리뷰 #5-1).
         ledger.check_budget(config.daily_call_budget)
 
+        # 파일 블록을 뺀 프롬프트 오버헤드(플레이북/오버레이·mode 지시문·question·
+        # context·구조화 지시)를 미리 실측한다. 이 바이트를 인라이닝 예산에서
+        # 빼야 큰 오버레이나 긴 question이 argv 한계를 넘길 때 auto가 초과분을
+        # 서빙으로 전환한다 — 파일 블록만 보면 폴백이 발동하지 않는다 (자체 리뷰).
+        playbooks_block = compose_playbooks_block(
+            mode,
+            project_root=config.project_root,
+            overlay_dir=config.overlay_dir,
+            enabled=config.playbooks_enabled,
+        )
+        overhead = assemble_prompt(
+            mode=mode, question=question, context=context,
+            files_block="", playbooks_block=playbooks_block, structured=structured,
+        )
+        reserved_bytes = len(overhead.encode("utf-8"))
+
         prepared: PreparedContext | None = None
         if files:
             prepared = prepare_context(
@@ -247,6 +265,7 @@ def build_server(config: Config) -> MCPServer:
                 project_root=config.project_root,
                 deny_globs=config.deny_globs,
                 max_chars=config.max_inline_chars,
+                reserved_bytes=reserved_bytes,
             )
 
         context_server: ContextServer | None = None
@@ -262,12 +281,7 @@ def build_server(config: Config) -> MCPServer:
                 question=question,
                 context=context,
                 files_block=files_block,
-                playbooks_block=compose_playbooks_block(
-                    mode,
-                    project_root=config.project_root,
-                    overlay_dir=config.overlay_dir,
-                    enabled=config.playbooks_enabled,
-                ),
+                playbooks_block=playbooks_block,
                 structured=structured,
             )
             # 스폰 전 선기록 (§13): id를 선점하고, 확인+기록을 원자 구간에서

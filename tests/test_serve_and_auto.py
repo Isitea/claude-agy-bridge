@@ -181,6 +181,22 @@ class TestAutoStrategy:
         assert prepared.strategy == "serve"
         assert "바이트" in prepared.reason
 
+    def test_reserved_bytes_forces_serve_for_large_overhead(self, tmp_path):
+        """후속 C: 큰 오버레이(무한정 고정 블록)가 argv 여력을 잠식하면, 파일이
+        파일-단독 예산을 통과해도 서빙으로 전환돼야 한다 — 아니면 조립 프롬프트가
+        argv 한계를 넘어 auto 폴백 없이 실패한다."""
+        # 렌더링 ~72 KB(한글). reserved=0 예산(122 KB)엔 들지만 70 KB 오버헤드를
+        # 계상하면(예산 ~52 KB) 초과하는 크기 — 문자 예산(100,000자)엔 여유가 있다.
+        (tmp_path / "doc.md").write_text("가나다라마바사아자차카타파하\n" * 1500)
+        no_reserve = self._prepare(["doc.md"], tmp_path)
+        assert no_reserve.strategy == "inline"  # 오버헤드를 모르면 인라이닝 판정
+
+        prepared = prepare_context(
+            ["doc.md"], project_root=tmp_path, deny_globs=(".env*",),
+            max_chars=100_000, reserved_bytes=70_000,
+        )
+        assert prepared.strategy == "serve"  # 오버헤드를 계상하면 서빙 전환
+
     def test_multibyte_assembled_prompt_stays_within_argv_limit(self, tmp_path):
         """리뷰 #1의 재현 시나리오 전체: 조립된 프롬프트가 argv 한계를 넘지 않는다."""
         from agy_bridge.prompts import assemble_prompt, compose_playbooks_block

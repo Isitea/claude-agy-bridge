@@ -38,14 +38,18 @@ SERVE_CHUNK_BYTES = 400_000
 # 3 B/자) 자료가 문자 예산을 통과하고도 argv 한계(바이트)를 넘어, auto 폴백이
 # 발동하지 못한 채 호출 전체가 실패한다. 그래서 문자·바이트 예산을 병행하고
 # 둘 중 먼저 걸리는 쪽을 적용한다 — ASCII 자료의 기존 동작은 변하지 않는다.
-# 헤드룸은 고정 블록(_common + 플레이북 + mode 지시문, 실측 최대 ~4.4 KB)과
-# question/context 몫이다. 사용자 입력은 무한정일 수 있으므로 조립 후의
-# ensure_prompt_within_argv_limit가 최종 방어선으로 남는다.
+#
+# reserved_bytes는 프롬프트에서 파일 블록을 뺀 나머지(_common + 플레이북/오버레이
+# + mode 지시문 + question + context + 구조화 지시)의 실측 바이트다. 호출자가
+# 넘기면 바이트 예산에서 차감한다 — 오버레이가 크거나 question이 길면 그만큼
+# 인라이닝 여력이 줄어 초과분이 서빙으로 전환된다. 여기 계상되지 않는 것은
+# 서빙 전환 시 덧붙는 URL 목록(작다)뿐이며, ARGV_HEADROOM_BYTES가 그 여유다.
 ARGV_HEADROOM_BYTES = 8_000
 
 
-def _budget_bytes(max_chars: int) -> int:
-    return min(max_chars * 3, ARGV_PROMPT_LIMIT_BYTES - ARGV_HEADROOM_BYTES)
+def _budget_bytes(max_chars: int, reserved_bytes: int = 0) -> int:
+    argv_room = ARGV_PROMPT_LIMIT_BYTES - reserved_bytes - ARGV_HEADROOM_BYTES
+    return min(max_chars * 3, max(0, argv_room))
 
 
 def parse_spec(spec: str) -> tuple[str, int | None, int | None]:
@@ -222,10 +226,15 @@ def prepare_context(
     project_root: Path,
     deny_globs: tuple[str, ...],
     max_chars: int,
+    reserved_bytes: int = 0,
 ) -> PreparedContext:
     """auto 전환 (§4.3): 지정 순서대로 인라이닝 예산을 채우고, 넘치는 파일부터는
     루프백 서빙 대상으로 돌린다. files 순서가 곧 우선순위다 — 검토 대상을 앞에
-    두라는 규약은 도구 설명문이 소비 세션에 전달한다."""
+    두라는 규약은 도구 설명문이 소비 세션에 전달한다.
+
+    reserved_bytes: 프롬프트에서 파일 블록을 뺀 나머지(플레이북/오버레이·mode
+    지시문·question·context 등)의 실측 바이트. 바이트 예산에서 차감해, 그 몫이
+    커지면 인라이닝 여력이 줄고 초과분이 서빙으로 전환되게 한다 (§2.3-D)."""
     rendered = [
         _render_spec(spec, project_root=project_root, deny_globs=deny_globs)
         for spec in specs
@@ -237,7 +246,7 @@ def prepare_context(
     served_manifest: list[dict] = []
     total_chars = 0
     total_bytes = 0
-    budget_bytes = _budget_bytes(max_chars)
+    budget_bytes = _budget_bytes(max_chars, reserved_bytes)
     overflowed = False
 
     for item in rendered:
