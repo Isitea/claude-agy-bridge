@@ -75,12 +75,38 @@ def test_missing_file_is_error(tmp_path):
 
 @pytest.mark.parametrize(
     "name", [".env", ".env.local", "api_key.py", "auth_token.json", "cert.pem",
-             "scf.chk", "orbital.wfn"]
+             "scf.chk", "orbital.wfn",
+             # 후속 B: 흔한 자격증명 파일명 (홈-루트에서도 이름으로 막힌다)
+             "id_rsa", "id_ed25519", "server.key", "keystore.p12",
+             ".netrc", ".npmrc", ".git-credentials", "aws_credentials"]
 )
 def test_credential_like_paths_are_denied(tmp_path, name):
     (tmp_path / name).write_text("SECRET=1")
     with pytest.raises(ContextError, match="deny_globs"):
         _inline([name], tmp_path)
+
+
+def test_credential_dir_paths_are_denied(tmp_path):
+    """후속 B: 경로 매칭 — 루트가 홈이 되는 구성에서 ~/.ssh/id_rsa 유출 차단."""
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    (ssh / "known_hosts").write_text("host key")  # 이름만으론 안 걸리는 파일
+    with pytest.raises(ContextError, match="deny_globs"):
+        _inline([".ssh/known_hosts"], tmp_path)
+
+
+def test_hardlink_to_outside_is_denied(tmp_path):
+    """후속 B (§10): 루트 안 하드링크가 밖 inode를 가리키는 우회 — 링크 수>1이면
+    거부한다. 경로 봉쇄는 하드링크를 감지하지 못한다."""
+    import os
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("OUTSIDE SECRET\n")
+    os.link(secret, root / "alias.txt")  # 루트 안 경로, 밖 inode
+    with pytest.raises(ContextError, match="하드링크"):
+        _inline(["alias.txt"], root)
 
 
 def test_size_cap_promotes_to_context_too_large(tmp_path):

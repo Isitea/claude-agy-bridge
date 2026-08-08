@@ -101,6 +101,16 @@ def _render_spec(
     if not abs_path.is_file():
         raise ContextError(f"{spec}: 파일이 없다 (project_root={project_root} 기준)")
 
+    # 하드링크 방어 (§10): 경로 기반 봉쇄는 resolve로 심링크만 정규화한다.
+    # 루트 안쪽에 만든 하드링크는 경로가 루트 안이라 봉쇄를 통과하지만 같은
+    # inode가 루트 밖 비밀 파일을 가리킬 수 있다. 소스 파일은 사실상 링크 수가
+    # 1이므로, 다중 하드링크 파일은 별칭 가능성으로 보고 거부한다.
+    if abs_path.stat().st_nlink > 1:
+        raise ContextError(
+            f"{spec}: 하드링크가 여럿인 파일은 전달하지 않는다 (§10 — 루트 밖 "
+            "자료의 별칭일 수 있다). 사본을 만들어 지정하라."
+        )
+
     lines = abs_path.read_text(encoding="utf-8", errors="replace").splitlines()
     total_lines = len(lines)
 

@@ -25,7 +25,21 @@ DEFAULT_WAIT_SECONDS = 45           # 동기 대기 창 — 넘으면 job 핸들
 DEFAULT_PRINT_TIMEOUT = 600         # agy --print-timeout, 초 (§5)
 DEFAULT_HARD_KILL_SECONDS = 900     # 브리지의 최종 안전망 (§5)
 DEFAULT_DAILY_CALL_BUDGET = 60      # 초과 시 스폰 전에 거부 (§13, budget.py)
-DEFAULT_DENY_GLOBS = (".env*", "*_key*", "*token*", "*.pem", "*.chk", "*.wfn")
+# 인라이닝·서빙 양쪽에 적용되는 자격증명 차단 목록 (§10). project_root 봉쇄가
+# 1차 방어선이고 이 목록이 '루트 안쪽'의 자격증명을 거르는 2차 방어선이다.
+# find_project_root가 .git 부재 시 CWD/홈을 루트로 삼는 구성에서는 봉쇄가
+# 무력해질 수 있으므로, 흔한 키·자격증명 파일명을 이름·경로로 폭넓게 막는다.
+# _is_denied는 파일명과 전체 경로 양쪽에 fnmatch를 적용한다.
+DEFAULT_DENY_GLOBS = (
+    ".env*",
+    "*.pem", "*.key", "*.p12", "*.pfx",       # 개인키·인증서 번들
+    "*_key*", "*token*", "*secret*", "*credential*",
+    "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",  # SSH 개인키
+    ".netrc", ".npmrc", ".pgpass", ".htpasswd", ".git-credentials",
+    "*/.ssh/*", "*/.aws/*", "*/.gnupg/*",     # 자격증명 디렉터리 (경로 매칭)
+    "*/.config/gh/*", "*/.docker/config.json",
+    "*.chk", "*.wfn",                          # 대형 계산 산출물 (§4.3 실측)
+)
 
 VALID_EFFORTS = ("low", "medium", "high")
 

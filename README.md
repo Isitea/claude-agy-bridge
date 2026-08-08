@@ -129,8 +129,15 @@ print_timeout     = 600          # agy 자체 타임아웃 (초)
 daily_call_budget = 60           # 초과 시 스폰 전에 사유와 함께 거부
 
 [context]
-deny_globs = [".env*", "*_key*", "*token*", "*.pem", "*.chk", "*.wfn"]
+# 기본값은 흔한 키·자격증명(.env*, *.pem, *.key, id_rsa*, .netrc, */.ssh/*,
+# */.aws/* 등)과 대형 산출물(*.chk, *.wfn)을 폭넓게 막는다. 아래처럼 지정하면
+# 기본값을 완전히 대체한다(보강 아님).
+deny_globs = [".env*", "*.pem", "*.key", "id_rsa*", "*.chk", "*.wfn"]
 ```
+
+> `files`는 프로젝트 루트 안쪽 경로만 허용된다(절대경로·상위 탈출·심링크·
+> 다중 하드링크는 거부). 루트가 홈 디렉터리·`/`가 되면 봉쇄가 약해지므로
+> `.git`이 있는 실제 저장소에서 실행하라 — `agy-bridge doctor`가 경고한다.
 
 우선순위: 도구 호출 인자 > `.agy-bridge.toml` > 환경변수(`AGY_BIN`,
 `AGY_BRIDGE_PROJECT_ROOT`, `AGY_BRIDGE_MODEL`, `AGY_BRIDGE_EFFORT`) > 내장 기본값.

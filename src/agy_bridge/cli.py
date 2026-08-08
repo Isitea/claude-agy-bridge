@@ -37,7 +37,10 @@ CONFIG_TEMPLATE = """\
 # daily_call_budget = 60           # 초과 시 도구가 사유와 함께 거부
 
 # [context]
-# deny_globs = [".env*", "*_key*", "*token*", "*.pem", "*.chk", "*.wfn"]
+# 기본 deny_globs는 흔한 키·자격증명(.env*, *.pem, *.key, id_rsa*, .netrc,
+# */.ssh/*, */.aws/* 등)과 대형 계산 산출물(*.chk, *.wfn)을 이름·경로로 막는다.
+# 아래처럼 지정하면 기본값을 완전히 대체한다 (보강이 아니라 교체다).
+# deny_globs = [".env*", "*.pem", "*.key", "id_rsa*", "*.chk", "*.wfn"]
 """
 
 OVERLAY_TEMPLATE = """\
@@ -363,6 +366,16 @@ def _doctor(args) -> int:
         check("설정 로드", False, str(exc))
         print(f"\n진단 결과: 실패 {failures}건")
         return 1
+
+    # 루트가 홈·파일시스템 루트면 project_root 봉쇄(§10)가 사실상 무력해진다 —
+    # 그 안의 ~/.ssh 등이 '루트 안쪽'으로 취급되기 때문. FAIL은 아니지만 경고한다.
+    root = config.project_root.resolve()
+    if root == Path.home().resolve() or root == Path(root.anchor):
+        print(
+            f"  [WARN] 프로젝트 루트가 {root}다 — files 봉쇄가 약해진다. "
+            ".git이 있는 실제 저장소에서 실행하거나 AGY_BRIDGE_PROJECT_ROOT로 "
+            "좁은 루트를 지정하라 (deny_globs가 흔한 자격증명은 계속 막는다)."
+        )
 
     probe = config.state_dir / ".doctor-probe"
     try:
