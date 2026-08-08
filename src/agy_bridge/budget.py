@@ -37,10 +37,12 @@ class Ledger:
         브리지 프로세스(같은 저장소의 다중 세션)와도 원자성이 성립해야 상한
         직전의 동시 호출이 각자 확인만 통과해 예산을 넘는 경합이 닫힌다 (§13)."""
         lock_path = self._path.with_suffix(".lock")
-        with self._lock, open(lock_path, "w") as handle:
+        # 락 순서 통일: flock → threading.Lock (jobs._job_lock·sessions와 동일)
+        with open(lock_path, "w") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
-                yield
+                with self._lock:
+                    yield
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
@@ -62,6 +64,33 @@ class Ledger:
                     entries.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue  # 손상 행은 건너뛴다 — 원장은 감사 보조 수단이다
+        return entries
+
+    def _entries_today(self) -> list[dict]:
+        """오늘 항목만 파싱한다. 원장은 시간순 append이므로 뒤에서부터 읽다가
+        다른 날짜를 만나면 멈춘다 — 예산 확인은 호출마다, 그것도 락 안에서
+        일어나므로 원장이 쌓일수록 전수 파싱 비용이 그대로 지연이 된다."""
+        if not self._path.is_file():
+            return []
+        today = _today()
+        with open(self._path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+
+        entries: list[dict] = []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            date = entry.get("date")
+            if date == today:
+                entries.append(entry)
+            elif date is not None:
+                break  # 더 과거 구간 — 오늘 항목은 없다
+        entries.reverse()
         return entries
 
     # ── 기록 ─────────────────────────────────────────────
@@ -118,8 +147,7 @@ class Ledger:
     # ── 예산 ─────────────────────────────────────────────
 
     def calls_today(self) -> int:
-        today = _today()
-        entries = [e for e in self._entries() if e.get("date") == today]
+        entries = self._entries_today()
         starts = sum(1 for e in entries if e.get("event") == "start")
         failed_spawns = sum(1 for e in entries if e.get("event") == "spawn_failed")
         return max(0, starts - failed_spawns)
@@ -156,7 +184,7 @@ class Ledger:
 
     def report(self, limit: int) -> dict:
         today = _today()
-        entries = [e for e in self._entries() if e.get("date") == today]
+        entries = self._entries_today()
         starts = [e for e in entries if e.get("event") == "start"]
         retries = [e for e in starts if e.get("retry")]
         failed_spawns = [e for e in entries if e.get("event") == "spawn_failed"]

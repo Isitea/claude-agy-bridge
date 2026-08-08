@@ -106,7 +106,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target",
         help="대상 저장소 경로 (생략 시 현재 디렉터리의 git 루트)",
     )
-    p_init.add_argument("--profile", help="AGY_BRIDGE_PROFILE 환경변수로 기록할 이름")
     p_init.add_argument(
         "--no-smoke", action="store_true", help="스모크 호출(실제 agy 1회) 생략"
     )
@@ -234,8 +233,6 @@ def _init(args) -> int:
             )
             return 1
     entry: dict = {"command": "agy-bridge", "args": ["serve"]}
-    if args.profile:
-        entry["env"] = {"AGY_BRIDGE_PROFILE": args.profile}
     mcp_data.setdefault("mcpServers", {})["agy"] = entry
     mcp_path.write_text(
         json.dumps(mcp_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -262,7 +259,18 @@ def _init(args) -> int:
     if args.no_smoke:
         print("[5/6] 스모크 생략 (--no-smoke)")
     else:
-        error = _smoke(load_config(target))
+        try:
+            config = load_config(target)
+        except StartupError as exc:
+            # 여기서 터지면 파일은 이미 만들어진 뒤라 저장소가 어중간하게 남는다.
+            # 무엇을 고쳐야 하는지 알려 주고 나머지 단계를 건너뛴다.
+            print(f"[5/6] 설정을 읽지 못해 스모크를 건너뛴다: {exc}", file=sys.stderr)
+            print(
+                "      .agy-bridge.toml을 고친 뒤 `agy-bridge doctor`로 확인하라.",
+                file=sys.stderr,
+            )
+            return 1
+        error = _smoke(config)
         if error:
             print(f"[5/6] 스모크 실패: {error}", file=sys.stderr)
             return 1

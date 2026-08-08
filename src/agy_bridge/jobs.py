@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import math
 import os
 import re
 import secrets
@@ -83,6 +84,11 @@ class JobRegistry:
     # 재시도해도 같은 결과가 나올 가능성이 높으므로 즉시 실패로 승격한다.
     MAX_ATTEMPTS = 2
 
+    # 종결된 job의 산출물(레코드·stdout·stderr·lock) 보존 기간. 정리하지 않으면
+    # job마다 4개씩 무한정 쌓이고, 스폰마다 도는 _next_job_id의 디렉터리 스캔이
+    # 그만큼 느려진다. 결과는 레코드에 들어 있으므로 오래된 원본은 버려도 된다.
+    RETENTION_DAYS = 30
+
     def __init__(
         self,
         config: Config,
@@ -100,6 +106,8 @@ class JobRegistry:
         self._on_retry = on_retry
         self._servers: dict[str, _SupportsClose] = {}  # job_id → ContextServer (§10.1)
         self._commands: dict[str, list[str]] = {}  # job_id → argv (재시도용, 메모리 전용)
+        with contextlib.suppress(OSError):
+            self.prune()
 
     # ── 경로 ─────────────────────────────────────────────
 
@@ -190,6 +198,30 @@ class JobRegistry:
                 continue
             os.close(fd)
             return f"j-{candidate}"
+
+    def prune(self, max_age_days: int | None = None) -> list[str]:
+        """보존 기간이 지난 **종결** job의 파일을 지운다. 실행 중이거나 아직
+        종결되지 않은 job은 절대 건드리지 않는다."""
+        days = self.RETENTION_DAYS if max_age_days is None else max_age_days
+        cutoff = time.time() - days * 86_400
+        removed = []
+        for entry in sorted(self._jobs_dir.glob("j-*.json")):
+            record = self._load_from_disk(entry.stem)
+            if record is None or record.state not in TERMINAL_STATES:
+                continue
+            finished = record.finished_at or record.created_at
+            if finished > cutoff:
+                continue
+            for path in (
+                entry,
+                self._stdout_path(entry.stem),
+                self._stderr_path(entry.stem),
+                self._jobs_dir / f"{entry.stem}.lock",
+            ):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+            removed.append(entry.stem)
+        return removed
 
     def claim_job_id(self) -> str:
         """스폰 전에 id가 필요한 호출자(원장 선기록 §13)를 위한 사전 선점."""
@@ -305,17 +337,24 @@ class JobRegistry:
                 start_new_session=True,  # 프로세스 그룹 분리 — 하드 킬과 재시작 생존
             )
 
-    def _start_watcher(self, job_id: str, process: subprocess.Popen) -> None:
+    def _start_watcher(
+        self, job_id: str, process: subprocess.Popen, deadline: float | None = None
+    ) -> None:
+        if deadline is None:
+            deadline = time.time() + self._config.hard_kill_seconds
         threading.Thread(
-            target=self._watch, args=(job_id, process), daemon=True,
+            target=self._watch, args=(job_id, process, deadline), daemon=True,
             name=f"watch-{job_id}",
         ).start()
 
     # ── 감시와 종결 ──────────────────────────────────────
 
-    def _watch(self, job_id: str, process: subprocess.Popen) -> None:
+    def _watch(self, job_id: str, process: subprocess.Popen, deadline: float) -> None:
+        # 하드 킬 한계는 job 전체의 상한이다. 시도마다 창을 새로 주면 재시도된
+        # job의 실제 상한이 두 배(900s → 1800s)가 되어 문서와 어긋난다.
         try:
-            returncode: int | None = process.wait(timeout=self._config.hard_kill_seconds)
+            remaining = max(0.1, deadline - time.time())
+            returncode: int | None = process.wait(timeout=remaining)
             timed_out = False
         except subprocess.TimeoutExpired:
             self._kill_group(process.pid)
@@ -454,7 +493,11 @@ class JobRegistry:
                 event = self._events.setdefault(job_id, threading.Event())
 
         if retry_process is not None:
-            self._start_watcher(job_id, retry_process)
+            # 재시도도 원래 job의 하드 킬 마감을 이어받는다 (상한은 job 단위)
+            self._start_watcher(
+                job_id, retry_process,
+                record.created_at + self._config.hard_kill_seconds,
+            )
             return
 
         if server is not None:
@@ -514,8 +557,17 @@ class JobRegistry:
                 record = self._records[job_id]
         return record
 
+    # 대기 창의 상한 — 이보다 오래 붙잡고 있어 봐야 하드 킬 한계를 넘는다.
+    MAX_WAIT_SECONDS = 3600.0
+
     def wait(self, job_id: str, timeout: float) -> JobRecord:
         """timeout 초까지 종결을 기다린다. 종결되지 않아도 현재 레코드를 반환한다."""
+        # NaN·inf·거대값 방어: Event.wait(inf)는 OverflowError를 던지고 폴링
+        # 분기는 영원히 돌아 스레드를 샌다. 호출자는 LLM이라 어떤 수도 올 수 있다.
+        if math.isnan(timeout) or timeout <= 0:
+            timeout = 0.0
+        timeout = min(float(timeout), self.MAX_WAIT_SECONDS)
+
         record = self.get(job_id)
         if record.state in TERMINAL_STATES or timeout <= 0:
             return record

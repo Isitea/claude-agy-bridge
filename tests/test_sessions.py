@@ -55,7 +55,14 @@ def test_corrupt_file_is_quarantined(bridge_config):
     store = SessionStore(config)
     (config.state_dir / "sessions.json").write_text("{{{ not json")
     assert store.list_sessions() == {}
-    assert (config.state_dir / "sessions.json.corrupt").exists()
+    backups = list(config.state_dir.glob("sessions.json.corrupt*"))
+    assert len(backups) == 1
+
+    # 두 번째 손상이 첫 백업(유일한 복구 단서)을 덮어쓰면 안 된다
+    (config.state_dir / "sessions.json").write_text("{{{ 또 깨짐")
+    assert store.list_sessions() == {}
+    assert len(list(config.state_dir.glob("sessions.json.corrupt*"))) >= 1
+    assert backups[0].exists()
 
 
 def test_concurrent_stores_do_not_lose_updates(bridge_config):

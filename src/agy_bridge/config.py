@@ -136,8 +136,12 @@ def load_config(cwd: Path | None = None) -> Config:
     if effort not in VALID_EFFORTS:
         raise StartupError(f"effort는 {VALID_EFFORTS} 중 하나여야 한다: {effort!r}")
 
-    deny = context.get("deny_globs")
-    deny_globs = tuple(deny) if deny else DEFAULT_DENY_GLOBS
+    if not isinstance(model, str) or not isinstance(effort, str):
+        raise StartupError("model·effort는 문자열이어야 한다.")
+
+    deny_globs = _string_list(context.get("deny_globs"), "[context] deny_globs") \
+        or DEFAULT_DENY_GLOBS
+    playbooks_enabled = _string_list(playbooks.get("enabled"), "[playbooks] enabled")
 
     state_dir = state_dir_for(root)
     scratch_dir = state_dir / "scratch"
@@ -151,19 +155,57 @@ def load_config(cwd: Path | None = None) -> Config:
         agy_bin=find_agy_bin(),
         model=model,
         effort=effort,
-        max_inline_chars=int(limits.get("max_inline_chars", DEFAULT_MAX_INLINE_CHARS)),
-        wait_seconds=int(limits.get("wait_seconds", DEFAULT_WAIT_SECONDS)),
-        print_timeout=int(limits.get("print_timeout", DEFAULT_PRINT_TIMEOUT)),
-        hard_kill_seconds=int(limits.get("hard_kill_seconds", DEFAULT_HARD_KILL_SECONDS)),
-        daily_call_budget=int(limits.get("daily_call_budget", DEFAULT_DAILY_CALL_BUDGET)),
-        deny_globs=deny_globs,
-        playbooks_enabled=(
-            tuple(playbooks["enabled"]) if "enabled" in playbooks else None
+        max_inline_chars=_int_limit(
+            limits, "max_inline_chars", DEFAULT_MAX_INLINE_CHARS, minimum=1
         ),
+        wait_seconds=_int_limit(limits, "wait_seconds", DEFAULT_WAIT_SECONDS, minimum=0),
+        print_timeout=_int_limit(
+            limits, "print_timeout", DEFAULT_PRINT_TIMEOUT, minimum=1
+        ),
+        # 0이면 스폰 직후 하드 킬돼 어떤 호출도 성공할 수 없다
+        hard_kill_seconds=_int_limit(
+            limits, "hard_kill_seconds", DEFAULT_HARD_KILL_SECONDS, minimum=1
+        ),
+        daily_call_budget=_int_limit(
+            limits, "daily_call_budget", DEFAULT_DAILY_CALL_BUDGET, minimum=0
+        ),
+        deny_globs=deny_globs,
+        playbooks_enabled=playbooks_enabled,
         overlay_dir=_validated_overlay_dir(
             playbooks.get("overlay_dir", ".agy-bridge/playbooks"), root
         ),
     )
+
+
+def _int_limit(limits: dict, key: str, default: int, *, minimum: int) -> int:
+    """[limits] 값은 설정 오류로 다뤄야 한다 — int()를 그대로 쓰면 ValueError가
+    StartupError 처리기를 지나쳐 raw traceback으로 터진다. 범위도 함께 막는다."""
+    value = limits.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StartupError(
+            f"[limits] {key}는 정수여야 한다: {value!r} "
+            f"({CONFIG_FILENAME}을 확인하라)"
+        )
+    if value < minimum:
+        raise StartupError(f"[limits] {key}는 {minimum} 이상이어야 한다: {value}")
+    return value
+
+
+def _string_list(value: object, label: str) -> tuple[str, ...] | None:
+    """문자열 하나를 주면 tuple()이 문자 단위로 쪼개 ('.', 'e', …)가 된다.
+    deny_globs에서 이러면 '*'가 섞여 들어가 모든 파일이 차단된다."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raise StartupError(
+            f"{label}은 문자열이 아니라 목록이어야 한다 (예: [\"{value}\"]). "
+            "문자열 하나를 주면 문자 단위로 쪼개진다."
+        )
+    if not isinstance(value, (list, tuple)) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise StartupError(f"{label}은 문자열 목록이어야 한다: {value!r}")
+    return tuple(value)
 
 
 def _validated_overlay_dir(overlay_dir: str, root: Path) -> str:

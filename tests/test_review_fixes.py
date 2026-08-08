@@ -145,6 +145,75 @@ class TestOverlayConfinement:
         assert discover_overlays(root, "../secrets") == []
 
 
+class TestConfigValidation:
+    def _load(self, tmp_path, monkeypatch, toml: str):
+        root = tmp_path / "repo"
+        (root / ".git").mkdir(parents=True)
+        (root / ".agy-bridge.toml").write_text(toml)
+        monkeypatch.setenv("AGY_BIN", "/bin/true")
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        monkeypatch.setenv("AGY_BRIDGE_PROJECT_ROOT", str(root))
+        return load_config()
+
+    def test_scalar_deny_globs_is_rejected(self, tmp_path, monkeypatch):
+        """후속: 문자열 하나를 주면 tuple()이 문자 단위로 쪼개 '*'가 섞여 들어가
+        모든 파일이 차단됐다 — 조용히 망가지느니 기동에서 거부한다."""
+        with pytest.raises(StartupError, match="목록이어야"):
+            self._load(tmp_path, monkeypatch, '[context]\ndeny_globs = ".env*"\n')
+
+    def test_scalar_playbooks_enabled_is_rejected(self, tmp_path, monkeypatch):
+        with pytest.raises(StartupError, match="목록이어야"):
+            self._load(tmp_path, monkeypatch, '[playbooks]\nenabled = "numerics"\n')
+
+    def test_non_integer_limit_is_startup_error(self, tmp_path, monkeypatch):
+        """후속: int()가 ValueError를 던지면 StartupError 처리기를 지나쳐
+        raw traceback으로 터진다."""
+        with pytest.raises(StartupError, match="정수여야"):
+            self._load(tmp_path, monkeypatch, '[limits]\nwait_seconds = "빠르게"\n')
+
+    @pytest.mark.parametrize(
+        "toml", ["[limits]\nhard_kill_seconds = 0\n", "[limits]\nprint_timeout = -5\n"]
+    )
+    def test_out_of_range_limits_are_rejected(self, tmp_path, monkeypatch, toml):
+        """hard_kill_seconds=0이면 스폰 직후 죽어 어떤 호출도 성공할 수 없다."""
+        with pytest.raises(StartupError, match="이상이어야"):
+            self._load(tmp_path, monkeypatch, toml)
+
+    def test_valid_config_still_loads(self, tmp_path, monkeypatch):
+        config = self._load(
+            tmp_path, monkeypatch,
+            '[context]\ndeny_globs = ["*.pem"]\n[limits]\nwait_seconds = 10\n',
+        )
+        assert config.deny_globs == ("*.pem",)
+        assert config.wait_seconds == 10
+
+
+class TestServerLifetime:
+    def test_closed_server_stops_serving_keepalive_connections(self):
+        """후속(§10.1): shutdown()은 accept 루프만 멈춘다 — 이미 열린 연결로는
+        job 종료 뒤에도 스냅샷 전체가 계속 나갔다."""
+        import http.client
+        from urllib.parse import urlparse
+
+        server = ContextServer({"big.txt": b"SECRET" * 500})
+        parsed = urlparse(server.url_for("big.txt"))
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+        conn.request("GET", parsed.path)
+        first = conn.getresponse()
+        first.read()
+        assert first.status == 200
+
+        server.close()
+        conn.request("GET", parsed.path)          # 같은 keep-alive 연결 재사용
+        second = conn.getresponse()
+        body = second.read()
+        conn.close()
+        assert second.status == 503
+        assert body == b""
+        # 대용량 스냅샷이 프로세스 수명 내내 메모리에 남지 않아야 한다
+        assert sum(len(v) for v in server._files.values()) == 0
+
+
 class TestRunnerContract:
     @pytest.mark.parametrize(
         "stdout",
@@ -270,6 +339,53 @@ class TestJobRobustness:
 
         fresh = JobRegistry(config)
         assert fresh.get(record.job_id).state == "completed"
+
+    def test_wait_tolerates_non_finite_timeouts(self, bridge_config, fake_agy):
+        """후속: wait_seconds=inf는 Event.wait에서 OverflowError를 냈고, 그 예외는
+        agy를 이미 띄운 뒤에 터져 job_id를 잃었다(프로세스는 계속 과금)."""
+        registry = JobRegistry(bridge_config(fake_agy(PAYLOAD)))
+        record = registry.start("p", mode="review", question="q")
+        for timeout in (float("inf"), float("nan"), 1e400, -5):
+            assert registry.wait(record.job_id, timeout) is not None
+
+    def test_retry_does_not_extend_hard_kill_ceiling(self, tmp_path, bridge_config):
+        """후속: 시도마다 하드 킬 창을 새로 주면 상한이 두 배가 된다."""
+        script = tmp_path / "hang-after-fail"
+        marker = tmp_path / "hang-marker"
+        script.write_text(
+            f"#!/bin/sh\n"
+            f"if [ ! -f {marker} ]; then touch {marker}; echo err >&2; exit 1; fi\n"
+            f"sleep 60\n"
+        )
+        script.chmod(0o755)
+        registry = JobRegistry(bridge_config(script, hard_kill_seconds=2))
+        started = time.time()
+        record = _wait_terminal(
+            registry, registry.start("p", mode="review", question="q").job_id,
+            timeout=12,
+        )
+        assert record.state == "timeout"
+        assert time.time() - started < 5  # 2초 상한이 재시도로 4초가 되지 않는다
+
+    def test_prune_removes_only_old_terminal_jobs(self, bridge_config, fake_agy):
+        """후속: job 산출물이 무한정 쌓이면 _next_job_id 스캔이 계속 느려진다."""
+        config = bridge_config(fake_agy(PAYLOAD))
+        registry = JobRegistry(config)
+        record = _wait_terminal(
+            registry, registry.start("p", mode="review", question="q").job_id
+        )
+        assert registry.prune(max_age_days=30) == []      # 갓 끝난 job은 남는다
+        assert registry.prune(max_age_days=0) == [record.job_id]
+        assert not (config.state_dir / "jobs" / f"{record.job_id}.json").exists()
+        assert not (config.state_dir / "jobs" / f"{record.job_id}.stdout").exists()
+
+    def test_prune_keeps_running_jobs(self, bridge_config, fake_agy):
+        registry = JobRegistry(bridge_config(fake_agy(PAYLOAD, sleep_seconds=30)))
+        record = registry.start("p", mode="review", question="q")
+        try:
+            assert registry.prune(max_age_days=0) == []  # 실행 중은 건드리지 않는다
+        finally:
+            registry.cancel(record.job_id)
 
     def test_retry_updates_pid_for_other_processes(self, tmp_path, bridge_config):
         """#5: 재시도로 pid가 바뀌면 다른 브리지 프로세스도 그것을 봐야 한다."""

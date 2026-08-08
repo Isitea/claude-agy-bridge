@@ -35,6 +35,8 @@ class ContextServer:
 
         token = self._token
         snapshot = self._files
+        state = {"closed": False}
+        self._state = state
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -49,6 +51,16 @@ class ContextServer:
                 self._serve(head=True)
 
             def _serve(self, head: bool):
+                # close() 이후 남아 있던 keep-alive 연결로 들어온 요청 — 서버
+                # 수명 = job 수명(§10.1)이므로 자료를 더 주지 않고 연결을 끊는다.
+                # shutdown()은 accept 루프만 멈춰서 기존 연결은 계속 처리된다.
+                if state["closed"]:
+                    self.send_response(503)
+                    self.send_header("Content-Length", "0")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.close_connection = True
+                    return
                 # 요청 타깃은 퍼센트 인코딩된 경로 + 선택적 쿼리스트링이다. 원문
                 # 비교하면 한글·공백이 든 이름은 어떤 정상 클라이언트로도 받을 수
                 # 없고(비ASCII는 요청 라인에 그대로 실을 수조차 없다), 캐시 무효화
@@ -121,5 +133,9 @@ class ContextServer:
             if self._closed:
                 return
             self._closed = True
+            self._state["closed"] = True
+            # 스냅샷을 비워 남은 요청이 자료를 받지 못하게 하고, 동시에 대용량
+            # 바이트가 프로세스 수명 내내 메모리에 고정되는 것을 푼다.
+            self._files.clear()
         self._httpd.shutdown()
         self._httpd.server_close()

@@ -123,9 +123,13 @@ enabled     = ["units-and-scales", "assumption-validity", "uncertainty-propagati
 overlay_dir = ".agy-bridge/playbooks"
 
 [limits]
-max_inline_chars  = 100000       # 인라이닝→서빙 자동 전환 임계값
+max_inline_chars  = 100000       # 인라이닝→서빙 자동 전환 임계값(문자).
+                                 # 바이트 상한이 병행 적용되며 멀티바이트 자료는
+                                 # 그쪽이 먼저 걸린다
 wait_seconds      = 45           # 동기 대기 창
 print_timeout     = 600          # agy 자체 타임아웃 (초)
+hard_kill_seconds = 900          # 브리지의 최종 안전망. job 전체 상한이며
+                                 # 재시도해도 늘어나지 않는다
 daily_call_budget = 60           # 초과 시 스폰 전에 사유와 함께 거부
 
 [context]
@@ -141,8 +145,14 @@ deny_globs = [".env*", "*.pem", "*.key", "id_rsa*", "*.chk", "*.wfn"]
 
 우선순위: 도구 호출 인자 > `.agy-bridge.toml` > 환경변수(`AGY_BIN`,
 `AGY_BRIDGE_PROJECT_ROOT`, `AGY_BRIDGE_MODEL`, `AGY_BRIDGE_EFFORT`) > 내장 기본값.
-상태(job·세션·원장)는 `~/.cache/claude-agy-bridge/<프로젝트 해시>/`에 프로젝트별로
-격리된다.
+값이 잘못되면(정수 자리에 문자열, 목록 자리에 문자열 등) 기동 시점에 조치 문장과
+함께 거부한다. 상태(job·세션·원장)는 `~/.cache/claude-agy-bridge/<프로젝트 해시>/`에
+프로젝트별로 격리되며, 종결된 job의 산출물은 30일 뒤 자동 정리된다.
+
+> **알아 둘 제약**: agy는 프롬프트를 명령행 인자로 받는다(`-p`). 따라서 인라이닝된
+> 파일 내용이 실행 중 같은 사용자의 다른 프로세스에게 `/proc/<pid>/cmdline`으로
+> 보인다. 다중 사용자 머신에서 민감한 소스를 다룬다면 이 점을 감안하라 — 서빙
+> 전략(전략 C)은 프롬프트에 URL만 실으므로 노출 면적이 훨씬 작다.
 
 ## 오버레이 — 프로젝트 고유 검증 항목 (§8.6)
 

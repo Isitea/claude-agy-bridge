@@ -29,10 +29,14 @@ class SessionStore:
         프로세스 내부 락만으로는 서로의 갱신을 덮어쓴다 (lost update, 리뷰 #4).
         conversation_id가 유실되면 세션 연속성(캐시 히트)이 끊어진다."""
         lock_path = self._path.with_suffix(".lock")
-        with self._lock, open(lock_path, "w") as handle:
+        # 락 순서는 저장소 전체에서 flock → threading.Lock으로 통일한다
+        # (jobs._job_lock과 동일). 반대로 잡으면 정지한 이웃 프로세스가 flock을
+        # 쥔 동안 이쪽 스레드 락까지 붙잡혀 다른 세션 연산이 전부 멈춘다.
+        with open(lock_path, "w") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
-                yield
+                with self._lock:
+                    yield
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
@@ -45,8 +49,11 @@ class SessionStore:
             # 세션 파일 손상은 치명적이지 않다 — 새로 시작하되 원본은 남겨 둔다.
             # UnicodeDecodeError(찢어진 쓰기)는 JSONDecodeError가 아니므로 함께
             # 잡지 않으면 호출자(감시 스레드 포함)로 새어 나간다.
+            # 백업 이름에 시각을 넣는다 — 고정 이름이면 두 번째 손상이 첫 백업
+            # (유일한 복구 단서)을 덮어쓴다.
+            stamp = time.strftime("%Y%m%dT%H%M%S")
             with contextlib.suppress(OSError):
-                self._path.rename(self._path.with_suffix(".json.corrupt"))
+                self._path.rename(self._path.with_suffix(f".json.corrupt.{stamp}"))
             return {}
 
     def _save(self, sessions: dict) -> None:

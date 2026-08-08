@@ -442,17 +442,20 @@ uv tool install --from /path/to/claude-agy-bridge agy-bridge
   "mcpServers": {
     "agy": {
       "command": "agy-bridge",
-      "args": ["serve"],
-      "env": { "AGY_BRIDGE_PROFILE": "quantum-chemistry" }
+      "args": ["serve"]
     }
   }
 }
 ```
 
+> 구현에서는 `profile` 개념을 쓰지 않는다. 어떤 플레이북을 실을지는 `mode` 정적
+> 매핑과 `[playbooks] enabled`, 그리고 저장소 오버레이(§8.6)로 결정되므로
+> 프로파일 이름을 따로 둘 이유가 없어졌다.
+
 부트스트랩 서브커맨드를 함께 제공한다:
 
 ```bash
-agy-bridge init --target /path/to/target-repo --profile quantum-chemistry
+agy-bridge init --target /path/to/target-repo
 #  → 대상 저장소에 .mcp.json 항목과 .agy-bridge.toml 생성, agy 바이너리 존재 여부 점검,
 #    스모크 호출 1회로 인증·응답을 검증한 뒤 결과를 출력한다.
 ```
