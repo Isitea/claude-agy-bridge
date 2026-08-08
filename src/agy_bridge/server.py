@@ -330,7 +330,9 @@ def build_server(config: Config) -> MCPServer:
     ) -> dict:
         conversation_id = None
         if session_id:
-            meta = sessions.resolve(session_id)
+            # 세션 조회는 flock(LOCK_EX)을 잡는다 — 이벤트 루프 스레드에서 직접
+            # 부르면 이웃 프로세스 정지 시 서버 전체가 얼어붙는다. 스레드로 넘긴다.
+            meta = await anyio.to_thread.run_sync(partial(sessions.resolve, session_id))
             if meta:
                 conversation_id = meta.get("conversation_id")
         return await anyio.to_thread.run_sync(
@@ -358,7 +360,8 @@ def build_server(config: Config) -> MCPServer:
                 abandon_on_cancel=True,
             )
         except UnknownJob:
-            known = ", ".join(r.job_id for r in registry.list_jobs()[-10:]) or "없음"
+            recent = await anyio.to_thread.run_sync(registry.list_jobs)
+            known = ", ".join(r.job_id for r in recent[-10:]) or "없음"
             raise RuntimeError(
                 f"job {job_id!r}를 모른다. 최근 job: {known}"
             ) from None
@@ -376,9 +379,10 @@ def build_server(config: Config) -> MCPServer:
         wait_seconds: float | None = None,
         structured: bool | None = None,
     ) -> dict:
-        meta = sessions.resolve(session_id)
+        meta = await anyio.to_thread.run_sync(partial(sessions.resolve, session_id))
         if meta is None:
-            known = ", ".join(sessions.list_sessions()) or "없음"
+            names = await anyio.to_thread.run_sync(sessions.list_sessions)
+            known = ", ".join(names) or "없음"
             raise RuntimeError(
                 f"세션 {session_id!r}를 모른다. 알려진 세션: {known}. "
                 "새 주제라면 agy_consult에 session_id를 주어 시작하라."
@@ -423,20 +427,27 @@ def build_server(config: Config) -> MCPServer:
         if action == "close":
             if not session_id:
                 raise RuntimeError('action="close"에는 session_id가 필요하다.')
-            return {"closed": sessions.close(session_id), "session_id": session_id}
-        active = [
-            {
-                "job_id": r.job_id,
-                "state": r.state,
-                "mode": r.mode,
-                "question_head": r.question_head,
-                "session_id": r.session_id,
-                "elapsed_s": r.elapsed_s(),
-            }
-            for r in registry.list_jobs()
-            if r.state not in TERMINAL_STATES
-        ]
-        return {"sessions": sessions.list_sessions(), "active_jobs": active}
+            closed = await anyio.to_thread.run_sync(partial(sessions.close, session_id))
+            return {"closed": closed, "session_id": session_id}
+
+        # 세션/job 조회는 flock·파일 I/O를 수반한다 — 이벤트 루프에서 직접 돌리지
+        # 않고 스레드로 넘긴다 (이웃 프로세스 정지 시 서버 동결 방지).
+        def _snapshot() -> dict:
+            active = [
+                {
+                    "job_id": r.job_id,
+                    "state": r.state,
+                    "mode": r.mode,
+                    "question_head": r.question_head,
+                    "session_id": r.session_id,
+                    "elapsed_s": r.elapsed_s(),
+                }
+                for r in registry.list_jobs()
+                if r.state not in TERMINAL_STATES
+            ]
+            return {"sessions": sessions.list_sessions(), "active_jobs": active}
+
+        return await anyio.to_thread.run_sync(_snapshot)
 
     return server
 
