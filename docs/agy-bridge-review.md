@@ -167,9 +167,9 @@ def test_multibyte_inline_stays_within_argv_limit(tmp_path):
 
 `.gitignore`에 `.claude/`가 없다. 내용에 다음이 포함된다.
 
-- 절대 경로: `<저장소 경로>`
-- Claude Code 세션 ID: `<세션 ID>`
-- 활성화된 도구·MCP 커넥터 전체 목록 (Gmail 커넥터 포함)
+- 작업자 홈 아래의 절대 경로
+- Claude Code 세션 ID
+- 활성화된 도구·MCP 커넥터 전체 목록 (외부 서비스 커넥터 포함)
 - 세션 트랜스크립트 본문
 
 README가 `raw.githubusercontent.com` 공개 설치 URL을 전제하고 있으므로(현재는 404 안내가 있으나 공개 예정으로 보임),

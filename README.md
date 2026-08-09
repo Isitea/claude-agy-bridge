@@ -32,9 +32,6 @@ curl -fsSL https://raw.githubusercontent.com/Isitea/claude-agy-bridge/main/insta
 agy-bridge update
 ```
 
-> 저장소가 비공개인 동안 위 curl은 404가 난다. 인증된 대안:
-> `gh api repos/Isitea/claude-agy-bridge/contents/install.sh -H "Accept: application/vnd.github.raw" | bash`
-
 수동 설치를 원하면 (동일한 결과):
 
 ```bash
