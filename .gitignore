@@ -26,3 +26,6 @@ mise.local.toml
 # 외부 저장소를 벤더링하지 않는다. 아래는 로컬에만 두고 각자 내려받는다.
 # google-deepmind/science-skills (Apache 2.0) — 설치 방법은 docs/plan.md §9 참조
 .agents/plugins/
+
+# 에디터 로컬 설정 (머신별 인터프리터 경로 등, 공유하지 않음)
+.vscode/
