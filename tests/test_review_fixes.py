@@ -211,6 +211,36 @@ class TestConfigValidation:
         )
         assert block.strip()
 
+    def test_conflicting_model_and_effort_is_rejected(self, tmp_path, monkeypatch):
+        """2차 리뷰: 조용히 한쪽을 버리면 'low로 낮췄다'고 믿으면서 high로 돈다.
+        수정 전에는 agy가 매 호출을 거부했으니, 침묵은 명백한 퇴행이다."""
+        with pytest.raises(StartupError, match="충돌한다"):
+            self._load(
+                tmp_path, monkeypatch,
+                'model = "gemini-3.1-pro-high"\neffort = "low"\n',
+            )
+
+    def test_level_suffixed_model_without_effort_adopts_its_level(
+        self, tmp_path, monkeypatch
+    ):
+        """effort를 적지 않았다면 모델 ID가 유일한 출처다 — Config가 그것을 반영해야
+        내부 정합이 맞는다 (기본값 high가 남아 있으면 안 된다)."""
+        config = self._load(tmp_path, monkeypatch, 'model = "gemini-3.1-pro-low"\n')
+        assert (config.model, config.effort) == ("gemini-3.1-pro-low", "low")
+
+    def test_matching_model_and_effort_is_accepted(self, tmp_path, monkeypatch):
+        config = self._load(
+            tmp_path, monkeypatch,
+            'model = "gemini-3.7-flash-medium"\neffort = "medium"\n',
+        )
+        assert config.effort == "medium"
+
+    def test_env_effort_also_conflicts(self, tmp_path, monkeypatch):
+        """환경변수 경로도 같은 명시 의도다 (우선순위: 파일 > 환경변수)."""
+        monkeypatch.setenv("AGY_BRIDGE_EFFORT", "low")
+        with pytest.raises(StartupError, match="충돌한다"):
+            self._load(tmp_path, monkeypatch, 'model = "gemini-3.1-pro-high"\n')
+
     def test_valid_config_still_loads(self, tmp_path, monkeypatch):
         config = self._load(
             tmp_path, monkeypatch,
@@ -218,6 +248,55 @@ class TestConfigValidation:
         )
         assert config.deny_globs == ("*.pem",)
         assert config.wait_seconds == 10
+
+
+class TestDoctorReporting:
+    """2차 리뷰: doctor가 '통과'를 찍는 근거는 실제 적용값이어야 한다."""
+
+    def test_empty_enabled_reports_zero_not_builtin_default(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from agy_bridge.cli import main as cli_main
+
+        root = tmp_path / "repo"
+        (root / ".git").mkdir(parents=True)
+        (root / ".agy-bridge.toml").write_text("[playbooks]\nenabled = []\n")
+        monkeypatch.setenv("AGY_BIN", "/bin/true")
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        monkeypatch.setenv("AGY_BRIDGE_PROJECT_ROOT", str(root))
+
+        cli_main(["doctor", "--no-smoke"])
+        line = next(
+            l for l in capsys.readouterr().out.splitlines() if "플레이북" in l
+        )
+        assert "설정 지정 0종" in line  # 빈 튜플이 falsy라 "내장 7종"으로 되돌아갔었다
+        assert "내장" not in line
+
+
+class TestSignalShutdown:
+    """2차 리뷰(실측): SystemExit으로 나가면 asyncio 루프의 정상 teardown을 건너뛰어
+    anyio 워커 스레드(non-daemon) join에서 인터프리터가 매달린다 — tools/list 이후
+    첫 SIGTERM이 무반응이었다. 기본 처리로 되돌린 뒤 같은 신호로 죽어야 한다."""
+
+    def test_die_by_signal_restores_default_and_reraises(self, monkeypatch):
+        import signal as signal_mod
+
+        from agy_bridge.server import _die_by_signal
+
+        restored: list[tuple[int, object]] = []
+        sent: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            signal_mod, "signal", lambda num, handler: restored.append((num, handler))
+        )
+        monkeypatch.setattr(
+            "agy_bridge.server.os.kill", lambda pid, num: sent.append((pid, num))
+        )
+
+        _die_by_signal(signal_mod.SIGTERM)
+
+        assert restored == [(signal_mod.SIGTERM, signal_mod.SIG_DFL)]
+        assert sent and sent[0][1] == signal_mod.SIGTERM
+        assert sent[0][0] == os.getpid()
 
 
 class TestStateMetaResilience:

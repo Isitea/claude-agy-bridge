@@ -25,7 +25,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
-from agy_bridge.config import VALID_EFFORTS, Config
+from agy_bridge.config import Config, baked_in_effort
 
 # argv 단일 인자 하드 리밋 131,072 B (§2.3-D). 여기 걸리면 프로세스가 뜨지도 못하고
 # E2BIG이 나므로, 스폰 전에 명확한 메시지로 실패시킨다.
@@ -96,7 +96,7 @@ def resolve_model_effort(
     믿으면서 실제로는 high로 도는 편이 오류보다 나쁘다.
     """
     resolved_model = model or config.model
-    baked = _baked_in_effort(resolved_model)
+    baked = baked_in_effort(resolved_model)
     if baked is None:
         return resolved_model, effort or config.effort
 
@@ -109,12 +109,6 @@ def resolve_model_effort(
             f"ID를 써라 (예: {resolved_model.rsplit('-', 1)[0]!r})."
         )
     return resolved_model, None
-
-
-def _baked_in_effort(model: str) -> str | None:
-    """모델 ID 끝에 박힌 사고 수준. 없으면 None."""
-    suffix = model.rsplit("-", 1)[-1]
-    return suffix if suffix in VALID_EFFORTS and "-" in model else None
 
 
 def build_command(

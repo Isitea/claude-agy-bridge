@@ -654,10 +654,13 @@ def _doctor(args) -> int:
     # 이 설정에서 **실제로 실릴** 목록을 검사한다. 내장 7종만 확인하면
     # [playbooks] enabled의 오타를 못 보고 "통과"를 찍는다 — 그 상태로는 모든
     # 호출이 실패하므로 doctor가 거짓 안심을 주는 셈이다(자체 리뷰).
-    selected = config.playbooks_enabled or BUILTIN_PLAYBOOKS
+    # `or`가 아니라 `is not None`이다 — enabled = [] 는 "전부 끄기"라는 명시적
+    # 선택인데, 빈 튜플이 falsy라 기본값으로 되돌아가 "내장 7종"을 보고했다.
+    enabled = config.playbooks_enabled
+    selected = enabled if enabled is not None else BUILTIN_PLAYBOOKS
     scope = (
         f"설정 지정 {len(selected)}종"
-        if config.playbooks_enabled
+        if enabled is not None
         else f"내장 {len(BUILTIN_PLAYBOOKS)}종"
     )
     try:

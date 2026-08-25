@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import signal
 import sys
 from functools import partial
@@ -531,6 +532,25 @@ def build_server(config: Config) -> MCPServer:
     return server
 
 
+def _die_by_signal(signum: int) -> None:
+    """정리를 마친 뒤 그 신호로 죽는다.
+
+    여기서 SystemExit을 올리면 asyncio 루프의 정상 teardown을 건너뛴다. anyio의
+    워커 스레드는 non-daemon이라 루프가 제대로 닫힐 때만 정지되므로, 남은 스레드를
+    join하며 인터프리터가 threading._shutdown에서 매달린다 — 실측으로 tools/list
+    이후 첫 SIGTERM이 무반응이고 두 번째 신호에야 종료됐다 (faulthandler 덤프:
+    main=threading._shutdown, worker=anyio._backends._asyncio.WorkerThread.run).
+
+    기본 처리로 되돌린 뒤 같은 신호를 자신에게 보내면 즉시 종료되고, 부모에게도
+    '신호로 죽었다'는 올바른 상태가 전달된다. 이 시점엔 _cleanup()이 이미 끝났고
+    agy 자식은 애초에 분리 실행(§5 재시작 생존)이라 잃을 정리가 없다.
+    """
+    sys.stderr.flush()
+    with contextlib.suppress(ValueError, OSError):
+        signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
 def serve() -> int:
     """`agy-bridge serve` 진입점. stdout은 MCP 채널이므로 로그는 stderr로만."""
     try:
@@ -561,7 +581,7 @@ def serve() -> int:
     def _on_signal(signum, _frame):
         # 기본 SIGTERM은 finally를 돌리지 않고 즉사시킨다 — 정리 후 나간다.
         _cleanup()
-        raise SystemExit(128 + signum)
+        _die_by_signal(signum)
 
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         with contextlib.suppress(ValueError, OSError):

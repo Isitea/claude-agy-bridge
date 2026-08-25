@@ -55,6 +55,17 @@ DEFAULT_DENY_GLOBS = (
 VALID_EFFORTS = ("low", "medium", "high")
 
 
+def baked_in_effort(model: str) -> str | None:
+    """모델 ID 끝에 박힌 사고 수준. 없으면 None.
+
+    `gemini-3.1-pro-high`처럼 수준이 박힌 ID는 그 자체가 effort를 정한다.
+    runner(argv 조립)와 load_config(설정 검증)가 같은 판정을 써야 하므로
+    여기 둔다 — 두 곳이 갈리면 설정은 통과하는데 호출이 거부되는 틈이 생긴다.
+    """
+    suffix = model.rsplit("-", 1)[-1]
+    return suffix if suffix in VALID_EFFORTS and "-" in model else None
+
+
 class StartupError(RuntimeError):
     """기동을 중단해야 하는 설정 오류. 메시지는 조치 가능한 문장으로 쓴다 (§9)."""
 
@@ -185,12 +196,28 @@ def load_config(cwd: Path | None = None) -> Config:
     env = os.environ
 
     model = raw.get("model") or env.get("AGY_BRIDGE_MODEL") or DEFAULT_MODEL
-    effort = raw.get("effort") or env.get("AGY_BRIDGE_EFFORT") or DEFAULT_EFFORT
+    explicit_effort = raw.get("effort") or env.get("AGY_BRIDGE_EFFORT")
+    effort = explicit_effort or DEFAULT_EFFORT
     if effort not in VALID_EFFORTS:
         raise StartupError(f"effort는 {VALID_EFFORTS} 중 하나여야 한다: {effort!r}")
 
     if not isinstance(model, str) or not isinstance(effort, str):
         raise StartupError("model·effort는 문자열이어야 한다.")
+
+    # 수준이 박힌 모델 ID는 effort를 스스로 정한다. 설정에 둘 다 적혀 있고 서로
+    # 어긋나면 기동에서 거부한다 — 조용히 한쪽을 버리면 "low로 낮췄다"고 믿으면서
+    # 실제로는 high로 도는, 오류보다 나쁜 상태가 된다 (자체 리뷰). effort를 적지
+    # 않았다면 모델이 유일한 출처이므로 그 값을 Config에 반영해 내부 정합을 지킨다.
+    baked = baked_in_effort(model)
+    if baked is not None:
+        if explicit_effort and explicit_effort != baked:
+            raise StartupError(
+                f"model={model!r}은 사고 수준 {baked!r}를 ID에 담고 있어 "
+                f"effort={explicit_effort!r}와 충돌한다. effort로 조절하려면 접미사 "
+                f"없는 패밀리 ID({model.rsplit('-', 1)[0]!r})를 쓰고, 이 모델을 쓰려면 "
+                f"effort 줄을 지워라 ({CONFIG_FILENAME})."
+            )
+        effort = baked
 
     deny_globs = _string_list(context.get("deny_globs"), "[context] deny_globs") \
         or DEFAULT_DENY_GLOBS
