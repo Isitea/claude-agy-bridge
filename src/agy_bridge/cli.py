@@ -651,14 +651,23 @@ def _doctor(args) -> int:
     except OSError as exc:
         check("상태 디렉터리 쓰기", False, f"{config.state_dir}: {exc}")
 
+    # 이 설정에서 **실제로 실릴** 목록을 검사한다. 내장 7종만 확인하면
+    # [playbooks] enabled의 오타를 못 보고 "통과"를 찍는다 — 그 상태로는 모든
+    # 호출이 실패하므로 doctor가 거짓 안심을 주는 셈이다(자체 리뷰).
+    selected = config.playbooks_enabled or BUILTIN_PLAYBOOKS
+    scope = (
+        f"설정 지정 {len(selected)}종"
+        if config.playbooks_enabled
+        else f"내장 {len(BUILTIN_PLAYBOOKS)}종"
+    )
     try:
-        for name in BUILTIN_PLAYBOOKS:
+        for name in selected:
             load_builtin_playbook(name)
         overlays = discover_overlays(config.project_root, config.overlay_dir)
         check(
             "플레이북",
             True,
-            f"내장 {len(BUILTIN_PLAYBOOKS)}종 + 오버레이 {len(overlays)}건"
+            f"{scope} + 오버레이 {len(overlays)}건"
             + (f" ({', '.join(n for n, _ in overlays)})" if overlays else ""),
         )
     except (OSError, ValueError) as exc:

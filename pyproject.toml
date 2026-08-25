@@ -8,8 +8,15 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 # 외부 의존성은 mcp 하나로 제한한다 (§7.1). 나머지는 표준 라이브러리로 해결.
+#
+# 메이저 상한은 필수다. CI는 `uv run`이라 uv.lock으로 고정되지만, 사용자의
+# 설치 경로(`uv tool install --from git+…`)는 lockfile을 쓰지 않고 매번 새로
+# 해석한다. 상한이 없으면 mcp가 breaking 릴리스를 내는 순간 CI는 초록인 채
+# 신규 설치만 ImportError로 죽는다 — 저장소를 봐도 원인이 보이지 않는 형태다.
+# server.py가 mcp.server.mcpserver.MCPServer라는 구체 경로에 의존하므로
+# 메이저 변경은 곧 파손이다.
 dependencies = [
-    "mcp",
+    "mcp>=2.1,<3",
 ]
 
 [project.scripts]

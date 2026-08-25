@@ -138,10 +138,18 @@ def write_state_meta(state_dir: Path, project_root: Path) -> None:
     """
     meta_path = state_dir / STATE_META_FILENAME
     payload = {"project_root": str(project_root), "version": 1}
-    with contextlib.suppress(OSError):
+    # JSONDecodeError(ValueError)까지 삼켜야 한다. OSError만 막으면 손상된
+    # meta.json 하나가 load_config를 raw traceback으로 죽이고, 그 경로에 있는
+    # serve·doctor·budget·init이 전부 기동조차 못 한다 — 정작 이 파일은 purge
+    # 표시용 정보 파일이라 다시 쓰면 그만이다 (_int_limit과 같은 교훈).
+    # dict가 아닌 JSON(배열 등)이면 .get에서 AttributeError가 나므로 함께 막는다.
+    with contextlib.suppress(OSError, json.JSONDecodeError):
         if meta_path.is_file():
             existing = json.loads(meta_path.read_text(encoding="utf-8"))
-            if existing.get("project_root") == payload["project_root"]:
+            if (
+                isinstance(existing, dict)
+                and existing.get("project_root") == payload["project_root"]
+            ):
                 return
     with contextlib.suppress(OSError):
         tmp = meta_path.with_suffix(f".json.{os.getpid()}.tmp")
@@ -186,7 +194,9 @@ def load_config(cwd: Path | None = None) -> Config:
 
     deny_globs = _string_list(context.get("deny_globs"), "[context] deny_globs") \
         or DEFAULT_DENY_GLOBS
-    playbooks_enabled = _string_list(playbooks.get("enabled"), "[playbooks] enabled")
+    playbooks_enabled = _validated_playbooks(
+        _string_list(playbooks.get("enabled"), "[playbooks] enabled")
+    )
 
     state_dir = state_dir_for(root)
     scratch_dir = state_dir / "scratch"
@@ -252,6 +262,29 @@ def _string_list(value: object, label: str) -> tuple[str, ...] | None:
     ):
         raise StartupError(f"{label}은 문자열 목록이어야 한다: {value!r}")
     return tuple(value)
+
+
+def _validated_playbooks(names: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """[playbooks] enabled의 이름이 실제로 존재하는지 기동 시점에 확인한다.
+
+    이름 검사가 없으면 오타 하나가 기동을 통과하고, 그 뒤 **모든** 호출이
+    load_builtin_playbook의 ValueError로 죽는다. 설정 오류는 기동에서 잡는다는
+    §7.4 원칙 그대로다 — 도구 호출 시점에 터지면 원인 파악이 어렵고, doctor는
+    내장 목록만 확인하므로 "전 항목 통과"라는 거짓 안심까지 준다.
+    """
+    if names is None:
+        return None
+    # 지역 import — prompts는 config를 쓰지 않으므로 순환은 없지만, 설정 해석이
+    # 플레이북 로딩 모듈에 기동 시점부터 묶이지는 않게 둔다.
+    from agy_bridge.prompts import BUILTIN_PLAYBOOKS
+
+    unknown = [name for name in names if name not in BUILTIN_PLAYBOOKS]
+    if unknown:
+        raise StartupError(
+            f"[playbooks] enabled에 알 수 없는 플레이북이 있다: {unknown}. "
+            f"내장 목록: {list(BUILTIN_PLAYBOOKS)} ({CONFIG_FILENAME}을 확인하라)"
+        )
+    return names
 
 
 def _validated_overlay_dir(overlay_dir: str, root: Path) -> str:

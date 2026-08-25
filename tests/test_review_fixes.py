@@ -179,6 +179,38 @@ class TestConfigValidation:
         with pytest.raises(StartupError, match="이상이어야"):
             self._load(tmp_path, monkeypatch, toml)
 
+    def test_unknown_playbook_name_is_rejected_at_startup(self, tmp_path, monkeypatch):
+        """자체 리뷰: 오타 하나가 기동을 통과하면 그 뒤 모든 호출이
+        load_builtin_playbook의 ValueError로 죽는다. doctor는 내장 목록만 보고
+        '전 항목 통과'를 찍어 거짓 안심까지 준다 — 기동에서 거부한다."""
+        with pytest.raises(StartupError, match="알 수 없는 플레이북"):
+            self._load(
+                tmp_path, monkeypatch,
+                '[playbooks]\nenabled = ["units-and-scale"]\n',  # 끝의 s 누락
+            )
+
+    def test_known_playbook_names_are_accepted(self, tmp_path, monkeypatch):
+        config = self._load(
+            tmp_path, monkeypatch,
+            '[playbooks]\nenabled = ["numerics", "derivation"]\n',
+        )
+        assert config.playbooks_enabled == ("numerics", "derivation")
+
+    def test_configured_playbooks_actually_compose(self, tmp_path, monkeypatch):
+        """기동을 통과한 설정은 실제 호출 경로에서도 조립돼야 한다."""
+        from agy_bridge.prompts import compose_playbooks_block
+
+        config = self._load(
+            tmp_path, monkeypatch, '[playbooks]\nenabled = ["numerics"]\n'
+        )
+        block = compose_playbooks_block(
+            "review",
+            project_root=config.project_root,
+            overlay_dir=config.overlay_dir,
+            enabled=config.playbooks_enabled,
+        )
+        assert block.strip()
+
     def test_valid_config_still_loads(self, tmp_path, monkeypatch):
         config = self._load(
             tmp_path, monkeypatch,
@@ -186,6 +218,38 @@ class TestConfigValidation:
         )
         assert config.deny_globs == ("*.pem",)
         assert config.wait_seconds == 10
+
+
+class TestStateMetaResilience:
+    """자체 리뷰: 상태 디렉터리의 meta.json은 purge 표시용 정보 파일이다.
+    그것이 손상됐다고 load_config가 raw traceback으로 죽으면 serve·doctor·
+    budget·init이 전부 기동조차 못 한다."""
+
+    def _root(self, tmp_path, monkeypatch):
+        root = tmp_path / "repo"
+        (root / ".git").mkdir(parents=True)
+        monkeypatch.setenv("AGY_BIN", "/bin/true")
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        monkeypatch.setenv("AGY_BRIDGE_PROJECT_ROOT", str(root))
+        return root
+
+    @pytest.mark.parametrize(
+        "corrupt", ['{"project_root": ', "", "[1, 2, 3]", "not json at all"]
+    )
+    def test_corrupt_state_meta_does_not_break_startup(
+        self, tmp_path, monkeypatch, corrupt
+    ):
+        from agy_bridge.config import STATE_META_FILENAME, state_dir_for
+
+        root = self._root(tmp_path, monkeypatch)
+        load_config()  # 상태 디렉터리와 meta.json을 만든다
+        meta = state_dir_for(root) / STATE_META_FILENAME
+        meta.write_text(corrupt, encoding="utf-8")
+
+        config = load_config()  # 손상돼 있어도 기동은 성공해야 한다
+        assert config.project_root == root
+        # 손상된 표식은 다시 쓰여 purge가 출처를 다시 보여줄 수 있다
+        assert json.loads(meta.read_text(encoding="utf-8"))["project_root"] == str(root)
 
 
 class TestServerLifetime:
