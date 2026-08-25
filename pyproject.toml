@@ -1,6 +1,6 @@
 [project]
 name = "agy-bridge"
-version = "0.3.1"
+version = "0.3.2"
 description = "Claude ↔ Antigravity(agy) 과학 검증 MCP 브리지 — 브리지에는 LLM이 없다"
 readme = "README.md"
 # 하한 실측 (리뷰 #7): 3.11·3.12에서 전체 테스트 통과, 3.10은 tomllib 부재로
