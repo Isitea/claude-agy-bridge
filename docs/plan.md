@@ -53,8 +53,16 @@ Antigravity(`agy`, 과학 스킬 탑재)를 **과학적 자문·검증자**로 �
 사용 가능 모델: `gemini-3.1-pro-high` / `gemini-3.1-pro-low` / `gemini-3.6-flash-{high,medium,low}` /
 `gemini-3.5-flash-{high,medium,low}` / `claude-sonnet-4-6` / `claude-opus-4-6-thinking` / `gpt-oss-120b-medium`
 
-> 검증 작업의 **독립성**을 위해 기본 모델은 `gemini-3.1-pro-high`로 고정한다.
-> agy를 통해 Claude 모델을 부르면 "다른 관점의 검증"이라는 목적이 훼손된다.
+> 검증 작업의 **독립성**을 위해 기본 모델은 gemini 계열로 고정한다 — 기본값은
+> `gemini-3.7-flash` / effort `high`. agy를 통해 Claude 모델을 부르면 "다른 관점의
+> 검증"이라는 목적이 훼손된다.
+>
+> 모델 ID는 사고 수준 접미사가 없는 **패밀리 ID**로 지정한다. agy는
+> `--model gemini-3.1-pro-high --effort low`처럼 수준이 박힌 ID와 어긋나는
+> `--effort`를 함께 받으면 `invalid model selection`으로 거부한다(실측). 브리지는
+> 수준이 박힌 ID에는 `--effort`를 붙이지 않고, 호출자가 어긋나는 effort를 명시하면
+> 스폰 전에 거부한다(§runner). 패밀리별 지원 범위는 다르다 — `gemini-3.1-pro`는
+> low·high뿐이고 flash 계열은 low·medium·high 셋을 모두 지원한다.
 
 ### 2.2 실측 비용·지연
 
@@ -228,7 +236,7 @@ agy는 워크스페이스 커스터마이즈(`.agents/skills/`, `AGENTS.md`)를 
     "question": "string",              // 필수. 무엇을 판단해 달라는지
     "files": ["src/solver.py:1-120"],  // 선택. 경로 또는 경로:행범위
     "context": "string",               // 선택. 물리 설정, 단위계, 가정, 경계조건 등
-    "model": "gemini-3.1-pro-high",    // 기본값
+    "model": "gemini-3.7-flash",       // 기본값 (수준 접미사 없는 패밀리 ID)
     "effort": "high",
     "session_id": "string",            // 선택. 있으면 --conversation 으로 재개
     "wait_seconds": 45,                // 이 시간까지는 동기 대기 (§5)
@@ -476,7 +484,7 @@ agy-bridge init --target /path/to/target-repo
 `.agy-bridge.toml` 예시 (대상 저장소에 위치):
 
 ```toml
-model  = "gemini-3.1-pro-high"
+model  = "gemini-3.7-flash"
 effort = "high"
 
 [playbooks]                        # §8. 스택이 아니라 관심사 단위로 고른다

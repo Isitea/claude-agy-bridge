@@ -20,7 +20,16 @@ CONFIG_FILENAME = ".agy-bridge.toml"
 
 # 검증 독립성을 위해 기본 모델은 gemini 계열로 고정한다.
 # agy를 통해 Claude 모델을 부르면 "다른 관점의 검증"이라는 목적이 훼손된다 (§2.1).
-DEFAULT_MODEL = "gemini-3.1-pro-high"
+#
+# 모델 ID는 접미사 없는 패밀리 ID로 둔다. agy는 `gemini-3.1-pro-high`처럼 사고
+# 수준이 박힌 ID와 `--effort`를 동시에 받으면 충돌로 거부한다 (실측):
+#   --model gemini-3.1-pro-high --effort low
+#     → invalid model selection: ... conflicts with --effort=low
+# 패밀리 ID를 기본값으로 두어야 effort가 실제로 조절 가능한 노브가 된다.
+# 패밀리가 지원하지 않는 값(gemini-3.1-pro의 medium 등)은 agy가 available 목록과
+# 함께 거부하므로, 브리지가 패밀리별 표를 들고 있지 않는다 — 썩을 표다.
+# flash 패밀리는 low·medium·high 셋을 모두 지원해 effort 조절 폭이 가장 넓다.
+DEFAULT_MODEL = "gemini-3.7-flash"
 DEFAULT_EFFORT = "high"
 DEFAULT_MAX_INLINE_CHARS = 100_000  # argv 단일 인자 131,072 B 한계 대비 마진 (§2.3-D)
 DEFAULT_WAIT_SECONDS = 45           # 동기 대기 창 — 넘으면 job 핸들 반환 (§5)

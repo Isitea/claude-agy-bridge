@@ -7,6 +7,12 @@
 
 안전 정책 (§10): --mode plan 고정(편집 의도 차단), --disable-slash-commands
 (조립된 프롬프트는 지시가 아니라 데이터다), --dangerously-skip-permissions 절대 미사용.
+
+단, --mode plan은 현재 agy에서 무력하다 — slash 확장을 끄면 효과가 없다고
+경고한다("--mode plan has no effect while slash command expansion is disabled").
+의도 표명으로 남겨두되, 검증자가 파일을 고치지 못하는 실제 근거는 헤드리스
+권한 자동 거부와 --dangerously-skip-permissions 미사용이다. plan 모드에
+기대지 마라.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
-from agy_bridge.config import Config
+from agy_bridge.config import VALID_EFFORTS, Config
 
 # argv 단일 인자 하드 리밋 131,072 B (§2.3-D). 여기 걸리면 프로세스가 뜨지도 못하고
 # E2BIG이 나므로, 스폰 전에 명확한 메시지로 실패시킨다.
@@ -73,6 +79,44 @@ def ensure_prompt_within_argv_limit(prompt: str) -> None:
         )
 
 
+def resolve_model_effort(
+    config: Config,
+    model: str | None,
+    effort: str | None,
+) -> tuple[str, str | None]:
+    """(모델, agy에 넘길 effort) 결정. 넘기지 않아야 하면 effort는 None이다.
+
+    agy는 model과 effort를 독립 인자로 받지 않는다 (실측):
+      - `gemini-3.1-pro-high`처럼 수준이 박힌 ID + 다른 --effort → 충돌로 거부
+      - 같은 ID + 일치하는 --effort → 통과하지만 중복이다
+      - 같은 ID + --effort 생략 → 통과 (수준은 ID가 이미 담고 있다)
+      - `gemini-3.1-pro` 같은 패밀리 ID + --effort → 정상 형태
+    그래서 수준이 박힌 ID에는 --effort를 붙이지 않는다. 다만 호출자가 어긋나는
+    effort를 명시했다면 조용히 무시하지 않고 거부한다 — 사고 수준을 낮췄다고
+    믿으면서 실제로는 high로 도는 편이 오류보다 나쁘다.
+    """
+    resolved_model = model or config.model
+    baked = _baked_in_effort(resolved_model)
+    if baked is None:
+        return resolved_model, effort or config.effort
+
+    # 명시 인자만 충돌로 본다. config.effort는 기본값이라, 호출자가 수준이 박힌
+    # 모델을 지정했으면 그쪽이 더 구체적인 지시다.
+    if effort is not None and effort != baked:
+        raise AgyError(
+            f"모델 {resolved_model!r}은 사고 수준 {baked!r}를 ID에 담고 있어 "
+            f"effort={effort!r}와 충돌한다. effort를 조절하려면 접미사 없는 패밀리 "
+            f"ID를 써라 (예: {resolved_model.rsplit('-', 1)[0]!r})."
+        )
+    return resolved_model, None
+
+
+def _baked_in_effort(model: str) -> str | None:
+    """모델 ID 끝에 박힌 사고 수준. 없으면 None."""
+    suffix = model.rsplit("-", 1)[-1]
+    return suffix if suffix in VALID_EFFORTS and "-" in model else None
+
+
 def build_command(
     prompt: str,
     *,
@@ -82,12 +126,16 @@ def build_command(
     conversation_id: str | None = None,
     json_schema: str | None = None,
 ) -> list[str]:
+    resolved_model, resolved_effort = resolve_model_effort(config, model, effort)
     cmd = [
         config.agy_bin,
         "-p", prompt,
         "--output-format", "json",
-        "--model", model or config.model,
-        "--effort", effort or config.effort,
+        "--model", resolved_model,
+    ]
+    if resolved_effort is not None:
+        cmd += ["--effort", resolved_effort]
+    cmd += [
         "--mode", "plan",
         "--disable-slash-commands",
         "--print-timeout", f"{config.print_timeout}s",

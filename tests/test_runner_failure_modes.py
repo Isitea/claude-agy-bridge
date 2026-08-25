@@ -109,6 +109,51 @@ def test_command_safety_flags(bridge_config):
     assert "--dangerously-skip-permissions" not in cmd
 
 
+def test_family_model_carries_effort_flag(bridge_config):
+    """접미사 없는 패밀리 ID에는 --effort를 넘긴다 (정상 형태)."""
+    from agy_bridge.runner import build_command
+
+    config = bridge_config("/bin/true", model="gemini-3.1-pro", effort="high")
+    cmd = build_command("질문", config=config)
+    assert cmd[cmd.index("--model") + 1] == "gemini-3.1-pro"
+    assert cmd[cmd.index("--effort") + 1] == "high"
+
+
+def test_level_suffixed_model_omits_effort_flag(bridge_config):
+    """수준이 박힌 ID에 --effort를 함께 넘기면 agy가 충돌로 거부한다 — 빼야 한다."""
+    from agy_bridge.runner import build_command
+
+    config = bridge_config("/bin/true", model="gemini-3.1-pro-high", effort="high")
+    cmd = build_command("질문", config=config)
+    assert cmd[cmd.index("--model") + 1] == "gemini-3.1-pro-high"
+    assert "--effort" not in cmd
+
+    # 호출 인자로 모델만 바꾸는 경로도 같다 (config.effort와 충돌시키지 않는다).
+    config = bridge_config("/bin/true", model="gemini-3.1-pro", effort="high")
+    cmd = build_command("질문", config=config, model="gemini-3.7-flash-medium")
+    assert "--effort" not in cmd
+
+
+def test_explicit_effort_conflicting_with_model_is_rejected(bridge_config):
+    """조용히 무시하지 않는다 — 낮췄다고 믿으며 high로 도는 게 오류보다 나쁘다."""
+    from agy_bridge.runner import build_command
+
+    config = bridge_config("/bin/true", model="gemini-3.1-pro-high", effort="high")
+    with pytest.raises(AgyError, match="충돌"):
+        build_command("질문", config=config, effort="low")
+
+
+def test_smoke_model_and_effort_agree(bridge_config):
+    """doctor·init 스모크(수준이 박힌 모델 + 일치하는 effort)는 거부되지 않는다."""
+    from agy_bridge.cli import SMOKE_MODEL
+    from agy_bridge.runner import build_command
+
+    config = bridge_config("/bin/true")
+    cmd = build_command("질문", config=config, model=SMOKE_MODEL, effort="low")
+    assert cmd[cmd.index("--model") + 1] == SMOKE_MODEL
+    assert "--effort" not in cmd
+
+
 def test_conversation_resume_flag(bridge_config):
     from agy_bridge.runner import build_command
 

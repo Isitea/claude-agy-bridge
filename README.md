@@ -2,7 +2,7 @@
 
 Claude Code 세션이 Antigravity CLI(`agy`)를 **독립 과학 검증자**로 부르게 하는
 MCP 브리지. 시뮬레이션·수치 코드의 열역학 처리, 단위계, 근사 타당성, 오차 전파를
-다른 모델(기본 `gemini-3.1-pro-high`)의 눈으로 재검토받는다.
+다른 모델(기본 `gemini-3.7-flash`, effort `high`)의 눈으로 재검토받는다.
 
 브리지 자체에는 LLM이 없다. 설정 해석, 파일 인라이닝, 서브프로세스 실행, 상태
 관리는 전부 결정론적 코드다 — 판단은 양 끝단(Claude와 agy)에만 있다.
@@ -141,8 +141,10 @@ curl -fsSL https://raw.githubusercontent.com/Isitea/claude-agy-bridge/main/unins
 ## 설정 레퍼런스 (`.agy-bridge.toml`, 대상 저장소)
 
 ```toml
-model  = "gemini-3.1-pro-high"   # 검증 독립성 — Claude 계열은 피하라
-effort = "high"                  # low | medium | high
+model  = "gemini-3.7-flash"      # 검증 독립성 — Claude 계열은 피하라
+effort = "high"                  # low | medium | high (패밀리별 지원 범위가 다르다)
+#                                # `gemini-3.1-pro-high`처럼 수준이 박힌 ID를 쓰면
+#                                # effort는 그 ID가 정한다 — 어긋나면 거부된다
 
 [playbooks]
 enabled     = ["units-and-scales", "assumption-validity", "uncertainty-propagation"]

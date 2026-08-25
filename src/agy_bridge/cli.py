@@ -23,8 +23,13 @@ CONFIG_TEMPLATE = """\
 # claude-agy-bridge 설정. 없는 키는 내장 기본값을 쓴다.
 # 우선순위: 도구 호출 인자 > 이 파일 > 환경변수 > 내장 기본값.
 
-# model  = "gemini-3.1-pro-high"   # 검증 독립성을 위해 Claude 계열 모델은 피하라
-# effort = "high"                  # low | medium | high
+# model  = "gemini-3.7-flash"      # 검증 독립성을 위해 Claude 계열 모델은 피하라
+# effort = "high"                  # low | medium | high (모델 패밀리별로 지원 범위가
+#                                  # 다르다 — gemini-3.1-pro는 low·high만)
+#
+# model에 `gemini-3.1-pro-high`처럼 사고 수준이 박힌 ID를 쓰면 effort는 그 ID가
+# 정하며, 어긋나는 effort는 agy가 거부한다. effort로 조절하려면 위처럼 접미사
+# 없는 패밀리 ID를 써라. 사용 가능한 ID는 `agy models`.
 
 # [playbooks]
 # enabled     = ["units-and-scales", "assumption-validity", "uncertainty-propagation"]

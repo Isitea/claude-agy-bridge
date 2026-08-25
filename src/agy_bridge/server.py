@@ -37,7 +37,7 @@ Mode = Literal["review", "verify", "derive", "literature", "design"]
 Effort = Literal["low", "medium", "high"]
 
 CONSULT_DESCRIPTION = """\
-독립 검증자 agy(Antigravity CLI, 기본 gemini-3.1-pro-high)에게 과학·수치 검증을 요청한다.
+독립 검증자 agy(Antigravity CLI, 기본 gemini-3.7-flash / effort high)에게 과학·수치 검증을 요청한다.
 
 언제 쓰는가: 수치 기법, 열역학 처리, 단위계·기준 상태, 근사의 타당성처럼 독립적인
 과학적 재검토가 가치 있는 시점. 새 수치 기법을 커밋하기 전, 물리량이 다른 모델로
